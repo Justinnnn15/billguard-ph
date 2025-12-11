@@ -1,5 +1,18 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { generateText } from "ai"
+import { google } from "@ai-sdk/google"
+import { createGroq } from "@ai-sdk/groq"
+
+// Initialize AI providers
+const groq = createGroq({ apiKey: process.env.GROQ_API_KEY })
+
+// Primary: Groq (better free tier - 30 req/min, 14,400 req/day)
+// Llama 4 Scout for vision (current supported model)
+const groqVisionModel = groq("meta-llama/llama-4-scout-17b-16e-instruct")
+const groqTextModel = groq("llama-3.3-70b-versatile")
+
+// Fallback: Google Gemini
+const geminiModel = google("gemini-2.0-flash-exp")
 
 // Parse bill text using simple regex and structured extraction
 function parseBillItems(
@@ -41,62 +54,97 @@ function parseBillItems(
 }
 
 async function extractTextFromFile(file: File): Promise<string> {
-  try {
-    if (file.type.startsWith("image/")) {
-      // For images, we'll use a simple base64 encoding approach
-      // In production, you'd use tesseract.js or Google Vision API
-      const buffer = await file.arrayBuffer()
-      const base64 = Buffer.from(buffer).toString("base64")
+  const buffer = await file.arrayBuffer()
+  const base64 = Buffer.from(buffer).toString("base64")
+  const mimeType = file.type || "image/jpeg"
 
-      // For now, return sample bill text as placeholder
-      // Production would send to OCR service
-      return `
-        MEDICAL BILLING STATEMENT
-        Patient Hospital Bill
-
-        Services Provided:
-        - Consultation with Doctor: ₱2,500
-        - X-ray Imaging Service: ₱3,200
-        - Laboratory Blood Test: ₱1,800
-        - ECG Test: ₱2,000
-        - Ultrasound Examination: ₱4,500
-        - Medications: ₱3,500
-        
-        Subtotal: ₱17,500
-        Subtotal verification needed
-        Total Amount Due: ₱17,500
-      `
-    } else if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
-      // For PDFs, simple approach
-      const buffer = await file.arrayBuffer()
-      // In production, use pdf-parse or similar
-      return `
-        MEDICAL BILLING STATEMENT
-        Hospital Bill Summary
-
-        Services:
-        - Doctor Consultation: ₱1,500
-        - Laboratory Testing: ₱2,200
-        - Imaging Services: ₱4,800
-        - Hospital Room: ₱8,000
-        - Medications: ₱2,100
-        
-        Total: ₱18,600
-      `
-    }
-
+  if (!file.type.startsWith("image/") && file.type !== "application/pdf" && !file.name.endsWith(".pdf")) {
     return "Unable to extract text from file"
-  } catch (error) {
-    console.error("[v0] Error extracting text:", error)
-    throw new Error("Failed to extract text from file")
+  }
+
+  const ocrPrompt = `Extract ALL text from this hospital/medical bill image. 
+                
+Focus on:
+1. Hospital/Clinic name
+2. Patient information (if visible)
+3. ALL itemized charges with their prices (very important!)
+4. Any subtotals, totals, discounts
+5. Dates and reference numbers
+
+Format the extracted text clearly, preserving the structure of line items and their corresponding prices.
+Use the peso sign (₱) for Philippine peso amounts.
+If you see amounts in the format "1,234.56" or just numbers, include them all.
+
+Return ONLY the extracted text, no commentary.`
+
+  // Try Groq Vision first (better free tier)
+  try {
+    console.log("[v0] Trying Groq Vision for OCR...")
+    const { text } = await generateText({
+      model: groqVisionModel,
+      maxRetries: 1,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              image: `data:${mimeType};base64,${base64}`,
+            },
+            {
+              type: "text",
+              text: ocrPrompt,
+            },
+          ],
+        },
+      ],
+    })
+
+    console.log("[v0] Groq OCR extracted text:", text)
+    return text
+  } catch (groqError: any) {
+    console.log("[v0] Groq failed, trying Google Gemini fallback...", groqError?.message)
+    
+    // Fallback to Google Gemini
+    try {
+      const { text } = await generateText({
+        model: geminiModel,
+        maxRetries: 1,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                image: `data:${mimeType};base64,${base64}`,
+              },
+              {
+                type: "text",
+                text: ocrPrompt,
+              },
+            ],
+          },
+        ],
+      })
+
+      console.log("[v0] Gemini OCR extracted text:", text)
+      return text
+    } catch (geminiError: any) {
+      console.error("[v0] Both AI providers failed:", geminiError?.message)
+      
+      if (geminiError?.message?.includes("quota") || geminiError?.lastError?.statusCode === 429) {
+        throw new Error("All AI services are rate limited. Please wait a moment and try again.")
+      }
+      
+      throw new Error("Failed to extract text from file. Please ensure the image is clear and try again.")
+    }
   }
 }
 
-async function analyzeBillWithGemini(billText: string) {
-  try {
-    const items = parseBillItems(billText)
+async function analyzeBillWithAI(billText: string) {
+  const items = parseBillItems(billText)
 
-    const prompt = `You are a healthcare billing expert analyzing a hospital bill for potential overcharges.
+  const prompt = `You are a healthcare billing expert analyzing a hospital bill for potential overcharges.
 
 Analyze these bill items against typical Philippine hospital rates:
 
@@ -137,14 +185,50 @@ Criteria:
 
 Return ONLY the JSON object, no other text.`
 
+  // Try Groq first (better free tier)
+  try {
+    console.log("[v0] Trying Groq for analysis...")
     const { text } = await generateText({
-      model: "google/gemini-2.0-flash",
+      model: groqTextModel,
+      maxRetries: 1,
       prompt,
     })
 
-    console.log("[v0] Gemini response:", text)
+    console.log("[v0] Groq analysis response:", text)
+    return parseAnalysisResponse(text, items)
+  } catch (groqError: any) {
+    console.log("[v0] Groq analysis failed, trying Gemini fallback...", groqError?.message)
+    
+    // Fallback to Google Gemini
+    try {
+      const { text } = await generateText({
+        model: geminiModel,
+        maxRetries: 1,
+        prompt,
+      })
 
-    // Parse the response
+      console.log("[v0] Gemini analysis response:", text)
+      return parseAnalysisResponse(text, items)
+    } catch (geminiError: any) {
+      console.error("[v0] Both AI providers failed for analysis:", geminiError?.message)
+      
+      // Return basic analysis as last resort
+      return {
+        items: items.map((item) => ({
+          name: item.name,
+          total: item.total,
+          status: item.total > 5000 ? "warning" : "fair",
+          reason: item.total > 5000 ? "Price is above average for this service" : "Price appears reasonable",
+          expectedPrice: item.total > 5000 ? item.total * 0.8 : null,
+        })),
+        overallAssessment: "Basic bill analysis complete (AI services unavailable)",
+      }
+    }
+  }
+}
+
+function parseAnalysisResponse(text: string, fallbackItems: Array<{ name: string; total: number }>) {
+  try {
     let jsonStr = text.trim()
     if (jsonStr.includes("```json")) {
       jsonStr = jsonStr.replace(/```json\n?/g, "").replace(/```\n?/g, "")
@@ -156,12 +240,9 @@ Return ONLY the JSON object, no other text.`
     console.log("[v0] Parsed analysis:", parsed)
     return parsed
   } catch (error) {
-    console.error("[v0] Error analyzing bill with Gemini:", error)
-
-    // Return a basic analysis using the extracted items
-    const items = parseBillItems(billText)
+    console.error("[v0] Error parsing AI response:", error)
     return {
-      items: items.map((item) => ({
+      items: fallbackItems.map((item) => ({
         name: item.name,
         total: item.total,
         status: item.total > 5000 ? "warning" : "fair",
@@ -188,8 +269,8 @@ export async function POST(request: NextRequest) {
     const billText = await extractTextFromFile(file)
     console.log("[v0] Extracted text:", billText)
 
-    // Analyze with Gemini
-    const analysis = await analyzeBillWithGemini(billText)
+    // Analyze with AI (Groq primary, Gemini fallback)
+    const analysis = await analyzeBillWithAI(billText)
 
     // Calculate totals and errors
     const totalCharges = analysis.items.reduce((sum: number, item: any) => sum + (item.total || 0), 0)
