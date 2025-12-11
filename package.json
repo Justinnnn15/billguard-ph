@@ -11,6 +11,7 @@
   "dependencies": {
     "@ai-sdk/google": "^2.0.46",
     "@ai-sdk/groq": "^2.0.33",
+    "@ai-sdk/openai": "^2.0.83",
     "@hookform/resolvers": "^3.10.0",
     "@radix-ui/react-accordion": "1.2.2",
     "@radix-ui/react-alert-dialog": "1.1.4",
@@ -57,6 +58,7 @@
     "react-hook-form": "^7.60.0",
     "react-resizable-panels": "^2.1.7",
     "recharts": "2.15.4",
+    "sharp": "^0.34.5",
     "sonner": "^1.7.4",
     "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7",

@@ -19,9 +19,15 @@ interface AnalysisData {
   items: BillItem[]
   overallAssessment: string
   totalCharges: number
-  totalOvercharge: number
+  statedTotal?: number | null
+  billSubtotal?: number | null
+  discounts?: number | null
+  payments?: number | null
+  totalMathErrors: number
   hasErrors: boolean
   errorCount: number
+  duplicateCount?: number
+  couldVerifyMath?: boolean
 }
 
 interface AnalysisResultsProps {
@@ -103,10 +109,26 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
               <span className="text-2xl">⚠</span>
               <div>
                 <p className="font-semibold text-red-900 dark:text-red-200">
-                  {data.errorCount} issue{data.errorCount > 1 ? "s" : ""} found in your bill
+                  {data.errorCount} billing error{data.errorCount > 1 ? "s" : ""} detected
                 </p>
                 <p className="text-sm text-red-700 dark:text-red-300">
-                  Potential overcharge: ₱{data.totalOvercharge.toLocaleString()}
+                  {data.duplicateCount ? `${data.duplicateCount} duplicate${data.duplicateCount > 1 ? 's' : ''} • ` : ''}Math errors: ₱{data.totalMathErrors.toLocaleString()}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : data.couldVerifyMath === false ? (
+        <div className="bg-yellow-50 dark:bg-yellow-950 border-b border-yellow-200 dark:border-yellow-800">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">⚠️</span>
+              <div>
+                <p className="font-semibold text-yellow-900 dark:text-yellow-200">
+                  Could not verify calculations
+                </p>
+                <p className="text-sm text-yellow-700 dark:text-yellow-300">
+                  Bill totals not detected. Only checked for duplicates. Try uploading a clearer image.
                 </p>
               </div>
             </div>
@@ -119,7 +141,7 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
               <span className="text-2xl">✓</span>
               <div>
                 <p className="font-semibold text-green-900 dark:text-green-200">
-                  No issues detected - Your bill looks good!
+                  Math verified - No errors detected!
                 </p>
               </div>
             </div>
@@ -160,11 +182,73 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                   </div>
                 ))}
               </div>
-              <div className="mt-6 pt-6 border-t border-border">
+              <div className="mt-6 pt-6 border-t border-border space-y-3">
+                {/* Our Calculated Subtotal */}
                 <div className="flex justify-between items-center">
-                  <p className="text-sm font-medium text-muted-foreground">Total Charges</p>
+                  <p className="text-sm font-medium text-muted-foreground">Our Calculated Subtotal</p>
                   <p className="text-2xl font-bold text-foreground">₱{data.totalCharges.toLocaleString()}</p>
                 </div>
+                
+                {/* Bill's Subtotal */}
+                {data.billSubtotal !== null && data.billSubtotal !== undefined && (
+                  <>
+                    <div className="flex justify-between items-center">
+                      <p className="text-sm font-medium text-muted-foreground">Bill's Subtotal</p>
+                      <p className={`text-xl font-bold ${Math.abs((data.billSubtotal || 0) - data.totalCharges) > 5 ? 'text-red-600' : 'text-foreground'}`}>
+                        ₱{data.billSubtotal.toLocaleString()}
+                      </p>
+                    </div>
+                    {Math.abs((data.billSubtotal || 0) - data.totalCharges) > 5 && (
+                      <div className="p-2 bg-red-50 dark:bg-red-950 rounded border border-red-200 dark:border-red-800">
+                        <p className="text-xs font-semibold text-red-700 dark:text-red-400">
+                          ⚠️ SUBTOTAL ERROR: ₱{Math.abs((data.billSubtotal || 0) - data.totalCharges).toLocaleString()} difference
+                        </p>
+                      </div>
+                    )}
+                  </>
+                )}
+                
+                {/* Discounts */}
+                {data.discounts !== null && data.discounts !== undefined && data.discounts > 0 && (
+                  <div className="flex justify-between items-center text-sm">
+                    <p className="text-green-600 dark:text-green-400">Less: Discounts</p>
+                    <p className="font-semibold text-green-600 dark:text-green-400">
+                      -₱{data.discounts.toLocaleString()}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Payments */}
+                {data.payments !== null && data.payments !== undefined && data.payments > 0 && (
+                  <div className="flex justify-between items-center text-sm">
+                    <p className="text-green-600 dark:text-green-400">Less: Payments Made</p>
+                    <p className="font-semibold text-green-600 dark:text-green-400">
+                      -₱{data.payments.toLocaleString()}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Balance Due */}
+                {data.statedTotal !== null && data.statedTotal !== undefined && (
+                  <div className="flex justify-between items-center pt-2 border-t">
+                    <p className="text-sm font-medium text-foreground">Balance Due</p>
+                    <p className="text-xl font-bold text-foreground">
+                      ₱{data.statedTotal.toLocaleString()}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Math Errors Amount */}
+                {data.totalMathErrors > 0 && (
+                  <div className="pt-2 border-t border-red-200">
+                    <div className="flex justify-between items-center">
+                      <p className="text-sm font-medium text-red-600 dark:text-red-400">Billing Errors Amount</p>
+                      <p className="text-lg font-bold text-red-600 dark:text-red-400">
+                        ₱{data.totalMathErrors.toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
             </Card>
           </div>
@@ -206,7 +290,10 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
           <div className="mt-8 text-center">
             <Card className="p-8 bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-800">
               <p className="text-lg font-semibold text-green-900 dark:text-green-200 mb-4">
-                Great news! Your bill appears accurate.
+                ✓ No billing errors detected. The math checks out!
+              </p>
+              <p className="text-sm text-green-700 dark:text-green-300 mb-4">
+                All line items are unique and calculations are correct.
               </p>
               <Button onClick={onBackToDashboard} variant="outline">
                 Analyze Another Bill
