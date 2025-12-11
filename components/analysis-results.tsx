@@ -23,6 +23,8 @@ interface AnalysisData {
   billSubtotal?: number | null
   discounts?: number | null
   payments?: number | null
+  hmoCoverage?: number | null
+  philhealthCoverage?: number | null
   totalMathErrors: number
   hasErrors: boolean
   errorCount: number
@@ -214,6 +216,26 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                     <p className="text-green-600 dark:text-green-400">Less: Discounts</p>
                     <p className="font-semibold text-green-600 dark:text-green-400">
                       -₱{data.discounts.toLocaleString()}
+                    </p>
+                  </div>
+                )}
+                
+                {/* HMO/Company Coverage */}
+                {data.hmoCoverage !== null && data.hmoCoverage !== undefined && data.hmoCoverage > 0 && (
+                  <div className="flex justify-between items-center text-sm">
+                    <p className="text-blue-600 dark:text-blue-400">Less: HMO/Company Coverage</p>
+                    <p className="font-semibold text-blue-600 dark:text-blue-400">
+                      -₱{data.hmoCoverage.toLocaleString()}
+                    </p>
+                  </div>
+                )}
+                
+                {/* PhilHealth Coverage */}
+                {data.philhealthCoverage !== null && data.philhealthCoverage !== undefined && data.philhealthCoverage > 0 && (
+                  <div className="flex justify-between items-center text-sm">
+                    <p className="text-blue-600 dark:text-blue-400">Less: PhilHealth Coverage</p>
+                    <p className="font-semibold text-blue-600 dark:text-blue-400">
+                      -₱{data.philhealthCoverage.toLocaleString()}
                     </p>
                   </div>
                 )}
