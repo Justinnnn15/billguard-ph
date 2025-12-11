@@ -14,6 +14,30 @@ const groqTextModel = groq("llama-3.3-70b-versatile")
 // Fallback: Google Gemini
 const geminiModel = google("gemini-2.0-flash-exp")
 
+// Keywords that indicate non-billable items (to be excluded)
+const excludeKeywords = [
+  'tel', 'telephone', 'phone', 'fax', 'email', 'address', 'city', 'street',
+  'admission no', 'admission date', 'discharge', 'patient name', 'age:',
+  'room no', 'case rate', 'run date', 'datetime', 'page', 'total:',
+  'subtotal', 'grand total', 'amount due', 'balance', 'edsa', 'avenue',
+  'blk', 'block', 'brgy', 'barangay', 'mandaluyong', 'manila', 'quezon',
+  'makati', 'pasig', 'taguig', 'cavite', 'laguna', 'cebu', 'davao'
+]
+
+// Keywords that indicate billable medical services
+const medicalKeywords = [
+  'room', 'emergency', 'laboratory', 'lab', 'pharmacy', 'medicine', 'medication',
+  'x-ray', 'xray', 'ct scan', 'mri', 'ultrasound', 'ecg', 'ekg', 'eeg',
+  'operating', 'surgery', 'surgical', 'anesthesia', 'professional fee',
+  'doctor', 'physician', 'surgeon', 'nursing', 'icu', 'nicu', 'recovery',
+  'respiratory', 'dialysis', 'chemotherapy', 'radiation', 'therapy',
+  'supplies', 'sterile', 'central', 'housekeeping', 'ambulance',
+  'blood', 'transfusion', 'infusion', 'injection', 'iv', 'oxygen',
+  'heart station', 'cardio', 'pulmo', 'neuro', 'gastro', 'ortho',
+  'ent', 'optha', 'derma', 'ob-gyn', 'pedia', 'internal medicine',
+  'floor', 'ward', 'private', 'semi-private', 'suite', 'charges'
+]
+
 // Parse bill text using simple regex and structured extraction
 function parseBillItems(
   billText: string,
@@ -31,12 +55,28 @@ function parseBillItems(
       const price = Number.parseFloat(priceMatch[1].replace(/,/g, ""))
       if (price > 0 && price < 500000) {
         // Reasonable hospital charge range
-        const nameMatch = line.replace(priceMatch[0], "").trim()
+        let nameMatch = line.replace(priceMatch[0], "").trim()
+        
+        // Clean up the name - remove asterisks and special characters
+        nameMatch = nameMatch.replace(/\*+/g, '').replace(/[:]+$/, '').trim()
+        
         if (nameMatch && nameMatch.length > 2) {
-          items.push({
-            name: nameMatch,
-            total: price,
-          })
+          const lowerName = nameMatch.toLowerCase()
+          
+          // Check if this looks like a non-billable item
+          const isExcluded = excludeKeywords.some(keyword => lowerName.includes(keyword))
+          
+          // Check if this looks like a medical service
+          const isMedical = medicalKeywords.some(keyword => lowerName.includes(keyword))
+          
+          // Only include if it's medical OR (not excluded AND price > 100)
+          // Small amounts like ₱1, ₱2, ₱10 are likely reference numbers
+          if (isMedical || (!isExcluded && price > 100)) {
+            items.push({
+              name: nameMatch,
+              total: price,
+            })
+          }
         }
       }
     }
@@ -62,20 +102,35 @@ async function extractTextFromFile(file: File): Promise<string> {
     return "Unable to extract text from file"
   }
 
-  const ocrPrompt = `Extract ALL text from this hospital/medical bill image. 
-                
-Focus on:
-1. Hospital/Clinic name
-2. Patient information (if visible)
-3. ALL itemized charges with their prices (very important!)
-4. Any subtotals, totals, discounts
-5. Dates and reference numbers
+  const ocrPrompt = `You are analyzing a hospital/medical bill image. Extract ONLY the billable charges/services and their amounts.
 
-Format the extracted text clearly, preserving the structure of line items and their corresponding prices.
-Use the peso sign (₱) for Philippine peso amounts.
-If you see amounts in the format "1,234.56" or just numbers, include them all.
+EXTRACT ONLY these types of items:
+- Medical services (Emergency Room, Operating Room, etc.)
+- Laboratory tests and fees
+- Diagnostic services (X-Ray, CT Scan, MRI, Ultrasound, etc.)
+- Pharmacy/Medication charges
+- Room charges and accommodation
+- Professional fees (Doctor fees, Surgeon fees, etc.)
+- Supplies and materials
+- Nursing care
+- Any other medical service with a price
 
-Return ONLY the extracted text, no commentary.`
+DO NOT EXTRACT:
+- Hospital name, address, or contact information
+- Patient name, age, or personal details
+- Admission numbers or reference numbers
+- Dates and timestamps
+- Page numbers
+- Headers and footers
+- Any text without an associated price/charge
+
+Format each item as: "Item Name: ₱Amount"
+Example:
+Emergency Room: ₱7,753
+Laboratory: ₱39,801
+X-Ray: ₱4,840
+
+Return ONLY the list of billable items with their prices, nothing else. Remove any asterisks (*) or special formatting characters from item names.`
 
   // Try Groq Vision first (better free tier)
   try {
@@ -144,46 +199,54 @@ Return ONLY the extracted text, no commentary.`
 async function analyzeBillWithAI(billText: string) {
   const items = parseBillItems(billText)
 
-  const prompt = `You are a healthcare billing expert analyzing a hospital bill for potential overcharges.
+  const prompt = `You are a healthcare billing expert analyzing a Philippine hospital bill for potential overcharges.
 
-Analyze these bill items against typical Philippine hospital rates:
+IMPORTANT: Only analyze actual medical charges/services. Ignore any items that are:
+- Phone numbers, addresses, or contact info
+- Patient details (name, age, admission numbers)
+- Dates, times, or reference numbers
+- Headers, footers, or page numbers
 
-${items.map((item) => `- ${item.name}: ₱${item.total.toLocaleString()}`).join("\n")}
+Analyze ONLY these bill items (medical services with prices):
 
-Philippine hospital rates reference:
-- Doctor Consultation: ₱1,000-2,000
-- Specialist Consultation: ₱1,500-3,000
-- X-ray/Imaging: ₱1,500-4,000
-- Laboratory tests: ₱500-2,000
-- Blood tests: ₱300-1,000
-- ECG: ₱1,000-2,000
-- Ultrasound: ₱2,000-4,000
-- CT Scan: ₱8,000-15,000
-- MRI: ₱15,000-25,000
-- Hospital room (per day): ₱3,000-10,000
-- Medications: Variable based on type
+${items.map((item) => `- ${item.name.replace(/\*+/g, '').trim()}: ₱${item.total.toLocaleString()}`).join("\n")}
 
-For each item, provide analysis in this JSON format ONLY (no markdown, just raw JSON):
+Philippine hospital rates reference (2024):
+- Emergency Room: ₱5,000-15,000
+- Operating Room: ₱30,000-150,000 (depends on procedure complexity)
+- Laboratory tests: ₱5,000-50,000 (depends on number of tests)
+- X-ray: ₱1,500-5,000
+- CT Scan: ₱8,000-25,000
+- MRI: ₱15,000-35,000
+- Ultrasound: ₱2,000-5,000
+- Pharmacy/Medications: ₱10,000-100,000+ (highly variable)
+- Hospital Room (per day): ₱3,000-15,000
+- ICU (per day): ₱15,000-50,000
+- Professional Fees: ₱5,000-50,000
+- Respiratory Care: ₱5,000-30,000
+- Central Sterile Supply: ₱3,000-15,000
+- Housekeeping: ₱500-2,000
+
+For each VALID medical charge, provide analysis in this JSON format ONLY:
 {
   "items": [
     {
-      "name": "exact item name from bill",
+      "name": "Clean item name without asterisks or special characters",
       "total": number,
-      "status": "fair" | "warning" | "overcharge" | "error",
-      "reason": "brief explanation of assessment",
+      "status": "fair" | "warning" | "overcharge",
+      "reason": "Brief 1-sentence explanation",
       "expectedPrice": number or null
     }
   ],
-  "overallAssessment": "summary of findings"
+  "overallAssessment": "Summary: X items analyzed, Y potential overcharges found totaling ₱Z"
 }
 
-Criteria:
-- "fair": Price is within normal range
-- "warning": Price is 10-30% above normal
-- "overcharge": Price is 30%+ above normal or mathematically incorrect
-- "error": Mathematical errors in bill (subtotal/total mismatch)
+Status criteria:
+- "fair": Price is within or below normal range
+- "warning": Price is 10-50% above normal range
+- "overcharge": Price is 50%+ above normal range
 
-Return ONLY the JSON object, no other text.`
+Return ONLY valid JSON, no markdown or extra text.`
 
   // Try Groq first (better free tier)
   try {
