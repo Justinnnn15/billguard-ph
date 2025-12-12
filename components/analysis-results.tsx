@@ -345,12 +345,15 @@ function EmailGenerationModal({
   if (!generatedEmail && isGenerating) {
     const generateEmail = async () => {
       try {
+        const errorItems = data.items.filter((item) => item.status === "overcharge" || item.status === "error")
+        const totalOvercharge = data.totalMathErrors || 0
+        
         const response = await fetch("/api/generate-email", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            items: data.items.filter((item) => item.status === "overcharge" || item.status === "error"),
-            totalOvercharge: data.totalOvercharge,
+            items: errorItems,
+            totalOvercharge: totalOvercharge,
           }),
         })
 
@@ -358,17 +361,19 @@ function EmailGenerationModal({
         setGeneratedEmail(result.email)
       } catch (error) {
         console.error("[v0] Error generating email:", error)
+        const errorItems = data.items.filter((item) => item.status === "overcharge" || item.status === "error")
+        const totalOvercharge = data.totalMathErrors || 0
+        
         setGeneratedEmail(
           "Subject: Dispute of Hospital Billing Charges\n\n" +
             "Dear Billing Department,\n\n" +
             "I am writing to dispute certain charges on my hospital bill.\n\n" +
             "I have reviewed my bill and identified the following discrepancies:\n" +
-            data.items
-              .filter((item) => item.status === "overcharge" || item.status === "error")
+            errorItems
               .map((item) => `- ${item.name}: ₱${item.total.toLocaleString()} (${item.reason})`)
               .join("\n") +
             "\n\nTotal overcharge identified: ₱" +
-            data.totalOvercharge.toLocaleString() +
+            totalOvercharge.toLocaleString() +
             "\n\nI kindly request a review and correction of these charges.\n\nThank you for your attention.\n\nBest regards",
         )
       } finally {

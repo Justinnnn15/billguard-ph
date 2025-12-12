@@ -1,9 +1,21 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { generateText } from "ai"
+import { createGoogleGenerativeAI } from "@ai-sdk/google"
+
+const google = createGoogleGenerativeAI({
+  apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+})
 
 export async function POST(request: NextRequest) {
+  let requestData: any = null
+  
   try {
-    const { items, totalOvercharge } = await request.json()
+    requestData = await request.json()
+    const { items, totalOvercharge } = requestData
+
+    if (!items || items.length === 0) {
+      throw new Error("No items provided")
+    }
 
     const itemsList = items
       .map((item: any) => `- ${item.name}: ₱${item.total.toLocaleString()} (${item.reason})`)
@@ -27,16 +39,18 @@ Email requirements:
 Format as complete email ready to send. Do not include any markdown or code blocks.`
 
     const { text } = await generateText({
-      model: "google/gemini-2.0-flash",
+      model: google("gemini-2.0-flash-exp"),
       prompt,
     })
 
     return NextResponse.json({ email: text })
   } catch (error) {
-    console.error("[v0] Error generating email:", error)
+    console.error("Error generating email:", error)
 
-    const { items, totalOvercharge } = await request.json()
-    const fallbackEmail = `Subject: Dispute of Hospital Billing Charges
+    // Use cached request data if available
+    if (requestData) {
+      const { items = [], totalOvercharge = 0 } = requestData
+      const fallbackEmail = `Subject: Dispute of Hospital Billing Charges
 
 Dear Billing Department,
 
@@ -53,6 +67,12 @@ Thank you for your attention to this matter.
 Respectfully,
 [Your Name]`
 
-    return NextResponse.json({ email: fallbackEmail })
+      return NextResponse.json({ email: fallbackEmail })
+    }
+    
+    return NextResponse.json(
+      { error: "Failed to generate email" },
+      { status: 500 }
+    )
   }
 }
