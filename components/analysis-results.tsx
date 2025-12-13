@@ -5,6 +5,27 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { ErrorSummary } from "./error-summary"
 
+interface DeductionBreakdownItem {
+  type: string
+  amount: number
+  description: string
+  hasDocumentation: boolean
+  documentationType?: string
+  documentationValue?: string
+  isVerified: boolean
+  verificationIssue?: string
+}
+
+interface DeductionValidation {
+  totalDeductions: number
+  verifiedDeductions: number
+  unverifiedDeductions: number
+  coverageStatus: 'confirmed' | 'unconfirmed' | 'no_coverage' | 'unknown'
+  validationPassed: boolean
+  issues: string[]
+  deductionBreakdown: DeductionBreakdownItem[]
+}
+
 interface BillItem {
   name: string
   quantity?: number
@@ -30,6 +51,8 @@ interface AnalysisData {
   errorCount: number
   duplicateCount?: number
   couldVerifyMath?: boolean
+  // NEW: Deduction validation (per improvement guidelines)
+  deductionValidation?: DeductionValidation
 }
 
 interface AnalysisResultsProps {
@@ -213,7 +236,12 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                 {/* Discounts */}
                 {data.discounts !== null && data.discounts !== undefined && data.discounts > 0 && (
                   <div className="flex justify-between items-center text-sm">
-                    <p className="text-green-600 dark:text-green-400">Less: Discounts</p>
+                    <div className="flex items-center gap-1">
+                      <p className="text-green-600 dark:text-green-400">Less: Discounts</p>
+                      {data.deductionValidation && !data.deductionValidation.validationPassed && (
+                        <span className="text-yellow-500" title="Requires verification">⚠️</span>
+                      )}
+                    </div>
                     <p className="font-semibold text-green-600 dark:text-green-400">
                       -₱{data.discounts.toLocaleString()}
                     </p>
@@ -223,7 +251,12 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                 {/* HMO/Company Coverage */}
                 {data.hmoCoverage !== null && data.hmoCoverage !== undefined && data.hmoCoverage > 0 && (
                   <div className="flex justify-between items-center text-sm">
-                    <p className="text-blue-600 dark:text-blue-400">Less: HMO/Company Coverage</p>
+                    <div className="flex items-center gap-1">
+                      <p className="text-blue-600 dark:text-blue-400">Less: HMO/Company Coverage</p>
+                      {data.deductionValidation?.coverageStatus === 'unconfirmed' && (
+                        <span className="text-yellow-500" title="Coverage not verified">⚠️</span>
+                      )}
+                    </div>
                     <p className="font-semibold text-blue-600 dark:text-blue-400">
                       -₱{data.hmoCoverage.toLocaleString()}
                     </p>
@@ -233,7 +266,12 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                 {/* PhilHealth Coverage */}
                 {data.philhealthCoverage !== null && data.philhealthCoverage !== undefined && data.philhealthCoverage > 0 && (
                   <div className="flex justify-between items-center text-sm">
-                    <p className="text-blue-600 dark:text-blue-400">Less: PhilHealth Coverage</p>
+                    <div className="flex items-center gap-1">
+                      <p className="text-blue-600 dark:text-blue-400">Less: PhilHealth Coverage</p>
+                      {data.deductionValidation?.coverageStatus === 'unconfirmed' && (
+                        <span className="text-yellow-500" title="Coverage not verified">⚠️</span>
+                      )}
+                    </div>
                     <p className="font-semibold text-blue-600 dark:text-blue-400">
                       -₱{data.philhealthCoverage.toLocaleString()}
                     </p>
@@ -243,7 +281,12 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                 {/* Payments */}
                 {data.payments !== null && data.payments !== undefined && data.payments > 0 && (
                   <div className="flex justify-between items-center text-sm">
-                    <p className="text-green-600 dark:text-green-400">Less: Payments Made</p>
+                    <div className="flex items-center gap-1">
+                      <p className="text-green-600 dark:text-green-400">Less: Payments Made</p>
+                      {data.deductionValidation && !data.deductionValidation.validationPassed && (
+                        <span className="text-yellow-500" title="Requires verification">⚠️</span>
+                      )}
+                    </div>
                     <p className="font-semibold text-green-600 dark:text-green-400">
                       -₱{data.payments.toLocaleString()}
                     </p>
@@ -269,6 +312,76 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
                         ₱{data.totalMathErrors.toLocaleString()}
                       </p>
                     </div>
+                  </div>
+                )}
+                
+                {/* Deduction Validation Status */}
+                {data.deductionValidation && data.deductionValidation.totalDeductions > 0 && (
+                  <div className="pt-3 mt-3 border-t border-border">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm font-semibold text-foreground">Deduction Verification</span>
+                      {data.deductionValidation.validationPassed ? (
+                        <span className="px-2 py-0.5 text-xs bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded-full">
+                          ✓ All Verified
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 text-xs bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 rounded-full">
+                          ⚠️ Requires Review
+                        </span>
+                      )}
+                    </div>
+                    
+                    {/* Deduction breakdown */}
+                    {data.deductionValidation.deductionBreakdown && data.deductionValidation.deductionBreakdown.length > 0 && (
+                      <div className="space-y-2 text-xs">
+                        {data.deductionValidation.deductionBreakdown.map((deduction, idx) => (
+                          <div key={idx} className={`p-2 rounded ${deduction.isVerified ? 'bg-green-50 dark:bg-green-950' : 'bg-yellow-50 dark:bg-yellow-950'}`}>
+                            <div className="flex justify-between items-start">
+                              <div className="flex-1">
+                                <p className="font-medium">{deduction.description}</p>
+                                <p className="text-muted-foreground">
+                                  Type: {deduction.type.toUpperCase()}
+                                  {deduction.hasDocumentation && deduction.documentationValue && (
+                                    <span> • {deduction.documentationValue}</span>
+                                  )}
+                                </p>
+                                {!deduction.isVerified && deduction.verificationIssue && (
+                                  <p className="text-yellow-600 dark:text-yellow-400 mt-1">
+                                    ⚠️ {deduction.verificationIssue}
+                                  </p>
+                                )}
+                              </div>
+                              <p className="font-semibold ml-2">₱{deduction.amount.toLocaleString()}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {/* Coverage status warning */}
+                    {data.deductionValidation.coverageStatus === 'unconfirmed' && (
+                      <div className="mt-2 p-2 bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800 rounded text-xs">
+                        <p className="font-semibold text-yellow-700 dark:text-yellow-300">
+                          ⚠️ Coverage Not Verified
+                        </p>
+                        <p className="text-yellow-600 dark:text-yellow-400 mt-1">
+                          HMO/Insurance coverage is applied but no policy number or LOA is visible. 
+                          Default assumption: Patient pays full amount unless coverage is proven.
+                        </p>
+                      </div>
+                    )}
+                    
+                    {/* Unverified deductions warning */}
+                    {data.deductionValidation.unverifiedDeductions > 0 && (
+                      <div className="mt-2 p-2 bg-orange-50 dark:bg-orange-950 border border-orange-200 dark:border-orange-800 rounded text-xs">
+                        <p className="font-semibold text-orange-700 dark:text-orange-300">
+                          ₱{data.deductionValidation.unverifiedDeductions.toLocaleString()} in unverified deductions
+                        </p>
+                        <p className="text-orange-600 dark:text-orange-400 mt-1">
+                          Request itemized breakdown with supporting documents before accepting these deductions.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

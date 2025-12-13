@@ -7,6 +7,49 @@ This system provides **100% accuracy** in determining if a hospital bill is:
 - ⚠️ **UNDERCHARGED** - Hospital loses money (patient pays less than they should)
 - 🚨 **OVERCHARGED** - Patient overpays (patient pays more than they should)
 
+## Core Principle
+
+**"Always validate calculations independently, never assume deductions are legitimate without clear documentation."**
+
+## Key Improvement Guidelines
+
+### 1. Verify All Line Item Totals
+- Always recalculate subtotals by adding up individual charges
+- Flag any discrepancies between stated totals and calculated sums
+- Don't accept pre-calculated totals at face value
+
+### 2. Require Explicit Payment Breakdown
+Before accepting any deduction from the total bill, the system verifies:
+- **What type**: Is it HMO coverage, insurance, discount, or deposit?
+- **Who authorized it**: Which company/policy/person?
+- **Documentation**: Reference number, approval code, or receipt
+- **Amount breakdown**: Each deduction shown separately, not lumped together
+
+### 3. Patient Coverage Validation
+- **Never assume** a patient has HMO/insurance coverage
+- Require explicit confirmation of coverage status
+- If coverage exists, require proof before applying deductions
+- Default assumption: Patient pays full amount unless proven otherwise
+
+### 4. Clear Labeling Requirements
+Ambiguous terms like "PAYMENTS/DEPOSITS/DISCOUNTS" are broken down into:
+- HMO Payment: ₱X (Policy #123)
+- Patient Deposit: ₱X (Receipt #456)
+- Senior Citizen Discount: ₱X (ID #789)
+- **Then** Balance Due: ₱X
+
+### 5. Two-Step Validation
+1. **Step 1**: Validate the bill's arithmetic (line items → subtotal → total)
+2. **Step 2**: Validate all deductions with supporting documentation
+3. Only after both steps pass should the final balance be accepted
+
+### Implementation Rule
+**"Question everything that reduces the amount owed. Require proof for all deductions."**
+
+This prevents both overcharging patients who don't have coverage and undercharging due to assumed benefits that don't exist.
+
+---
+
 ## How It Works
 
 ### Step 1: Extract Line Items with Hierarchy Understanding
@@ -359,6 +402,26 @@ Net: ₱4,500
   philhealthCoverage: number,
   statedTotal: number,
   
+  // NEW: Deduction Validation (per improvement guidelines)
+  deductionValidation: {
+    totalDeductions: number,
+    verifiedDeductions: number,
+    unverifiedDeductions: number,
+    coverageStatus: "confirmed" | "unconfirmed" | "no_coverage" | "unknown",
+    validationPassed: boolean,
+    issues: string[],
+    deductionBreakdown: Array<{
+      type: "hmo" | "philhealth" | "insurance" | "discount" | "deposit" | "payment" | "unknown",
+      amount: number,
+      description: string,
+      hasDocumentation: boolean,
+      documentationType?: string,
+      documentationValue?: string,
+      isVerified: boolean,
+      verificationIssue?: string
+    }>
+  },
+  
   // Item-level details
   items: Array<{
     name: string,
@@ -370,6 +433,52 @@ Net: ₱4,500
 }
 ```
 
+## Deduction Validation System
+
+### Core Principle
+**"Question everything that reduces the amount owed. Require proof for all deductions."**
+
+### Validation Process
+
+For each deduction found, the system verifies:
+
+1. **Type Classification**
+   - HMO Coverage
+   - PhilHealth Coverage
+   - Insurance Coverage
+   - Senior Citizen/PWD Discount
+   - Patient Deposit
+   - Payment Made
+   - Unknown (flagged for review)
+
+2. **Documentation Check**
+   - Policy number
+   - Receipt number
+   - Approval code
+   - ID number
+   - Authorization reference
+
+3. **Coverage Status**
+   - `confirmed`: Documentation visible and verified
+   - `unconfirmed`: Coverage applied but no documentation
+   - `no_coverage`: No third-party coverage found
+   - `unknown`: Could not determine
+
+### Validation Flags
+
+| Scenario | Status | Action Required |
+|----------|--------|-----------------|
+| All deductions have documentation | ✅ Passed | None |
+| Some deductions undocumented | ⚠️ Warning | Request itemized breakdown |
+| Coverage without policy number | ⚠️ Unconfirmed | Verify coverage before accepting |
+| Lumped "PAYMENTS/DEPOSITS/DISCOUNTS" | ❌ Failed | Require explicit breakdown |
+
+### Default Assumption
+If coverage cannot be verified:
+- **Patient pays FULL amount**
+- Coverage is NOT applied automatically
+- Documentation must be provided to apply any deduction
+
 ## Testing Recommendations
 
 Test with bills that have:
@@ -380,6 +489,9 @@ Test with bills that have:
 5. ✅ Multiple deductions (SC + PhilHealth + Payments)
 6. ⚠️ Duplicate line items
 7. ⚠️ Parent-child category confusion
+8. **NEW:** ⚠️ Undocumented deductions
+9. **NEW:** ⚠️ Lumped payment sections
+10. **NEW:** ⚠️ Assumed coverage without proof
 
 ## Accuracy Target
 
@@ -391,3 +503,4 @@ Test with bills that have:
 - Bill format variations
 - OCR accuracy
 - Hidden/implicit deductions
+- **NEW:** Unclear deduction documentation

@@ -394,6 +394,35 @@ function parseAnalysisResponse(text: string, fallbackItems: Array<{ name: string
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// DEDUCTION VALIDATION TYPES - Per improvement guidelines
+// "Question everything that reduces the amount owed. Require proof for all deductions."
+// ═══════════════════════════════════════════════════════════════════
+
+interface DeductionItem {
+  type: 'hmo' | 'philhealth' | 'insurance' | 'discount' | 'deposit' | 'payment' | 'unknown'
+  amount: number
+  description: string
+  // Documentation fields - REQUIRED for validation
+  hasDocumentation: boolean
+  documentationType?: 'policy_number' | 'receipt_number' | 'approval_code' | 'id_number' | 'none'
+  documentationValue?: string // e.g., "Policy #HMO-2024-12345"
+  authorizedBy?: string // Who approved this deduction
+  // Validation status
+  isVerified: boolean
+  verificationIssue?: string
+}
+
+interface DeductionValidation {
+  totalDeductions: number
+  verifiedDeductions: number
+  unverifiedDeductions: number
+  deductionItems: DeductionItem[]
+  coverageStatus: 'confirmed' | 'unconfirmed' | 'no_coverage' | 'unknown'
+  validationPassed: boolean
+  issues: string[]
+}
+
 // Extract full bill financial structure using Master Prompt v4.0
 interface BillFinancials {
   calculatedLineItemsTotal: number // AI's calculated sum (with duplicate prevention)
@@ -406,6 +435,9 @@ interface BillFinancials {
   lineItemsMatchSubtotal: boolean | null // Whether AI's calculation matches bill's subtotal
   duplicatesDetected: number // Number of potential duplicates found
   rawText: string
+  // NEW: Deduction validation (per improvement guidelines)
+  deductionBreakdown?: DeductionItem[]
+  hasAmbiguousDeductions?: boolean
 }
 
 async function extractBillFinancials(enhancedBuffer: Buffer, enhancedMimeType: string): Promise<BillFinancials> {
@@ -489,6 +521,22 @@ Find the amount patient is supposed to pay (look for):
 - "Net Amount Due"
 - "Patient Responsibility"
 
+### STEP 7: DEDUCTION VALIDATION (CRITICAL)
+
+**CORE PRINCIPLE**: Never assume deductions are legitimate without clear documentation.
+**DEFAULT ASSUMPTION**: Patient pays FULL amount unless coverage is PROVEN.
+
+For EACH deduction found, you MUST determine:
+1. **Type**: Is it HMO, PhilHealth, Insurance, SC/PWD Discount, Deposit, or Payment?
+2. **Documentation**: Is there a reference number, policy number, receipt, or approval code?
+3. **Authorization**: Who authorized this deduction? (Company name, policy holder, etc.)
+
+**FLAG AS AMBIGUOUS** if you see:
+- "PAYMENTS/DEPOSITS/DISCOUNTS" lumped together without breakdown
+- Deductions without clear labels
+- Coverage applied without policy/member numbers visible
+- Large deductions without explanation
+
 ### OUTPUT FORMAT (JSON ONLY):
 
 \`\`\`json
@@ -501,7 +549,26 @@ Find the amount patient is supposed to pay (look for):
   "payments": 4960.00,
   "balanceDue": 38125.00,
   "lineItemsMatchSubtotal": false,
-  "duplicatesDetected": 0
+  "duplicatesDetected": 0,
+  "deductionBreakdown": [
+    {
+      "type": "discount",
+      "amount": 1240.00,
+      "description": "Senior Citizen Discount",
+      "hasDocumentation": true,
+      "documentationType": "id_number",
+      "documentationValue": "SC ID #123456"
+    },
+    {
+      "type": "hmo",
+      "amount": 12000.00,
+      "description": "HMO Coverage",
+      "hasDocumentation": false,
+      "documentationType": "none",
+      "documentationValue": null
+    }
+  ],
+  "hasAmbiguousDeductions": true
 }
 \`\`\`
 
@@ -516,6 +583,8 @@ Find the amount patient is supposed to pay (look for):
 8. lineItemsMatchSubtotal = true if |calculatedLineItemsTotal - subtotal| <= 10
 9. duplicatesDetected = number of duplicate line items found
 10. Use 0.00 (not null) for fields not found
+11. deductionBreakdown = Array of each individual deduction with documentation status
+12. hasAmbiguousDeductions = true if ANY deduction lacks clear documentation/breakdown
 
 **VALIDATION CHECKS YOU MUST DO**:
 1. Does calculatedLineItemsTotal match subtotal? (within ₱10)
@@ -549,10 +618,49 @@ Return ONLY valid JSON, no other text.`
 
       console.log("[v0] Groq financial response:", text)
       
-      const jsonMatch = text.match(/\{[\s\S]*?\}/)
+      // Try to match the full JSON object including nested arrays
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0])
-        const result = {
+        
+        // Process deduction breakdown if present
+        const deductionBreakdown: DeductionItem[] = []
+        if (parsed.deductionBreakdown && Array.isArray(parsed.deductionBreakdown)) {
+          for (const item of parsed.deductionBreakdown) {
+            deductionBreakdown.push({
+              type: item.type || 'unknown',
+              amount: item.amount || 0,
+              description: item.description || 'Unknown deduction',
+              hasDocumentation: item.hasDocumentation || false,
+              documentationType: item.documentationType || 'none',
+              documentationValue: item.documentationValue || undefined,
+              authorizedBy: item.authorizedBy || undefined,
+              isVerified: item.hasDocumentation === true,
+              verificationIssue: item.hasDocumentation ? undefined : 'No documentation found'
+            })
+          }
+        }
+        
+        // Auto-detect ambiguous deductions if not explicitly set
+        let hasAmbiguousDeductions = parsed.hasAmbiguousDeductions ?? false
+        
+        // Flag as ambiguous if there are deductions but no breakdown
+        const totalDeductionsAmount = (parsed.discounts || 0) + (parsed.payments || 0) + 
+          (parsed.hmoCoverage || 0) + (parsed.philhealthCoverage || 0)
+        
+        if (totalDeductionsAmount > 0 && deductionBreakdown.length === 0) {
+          hasAmbiguousDeductions = true
+          console.log("[v0] ⚠️ Deductions found but no breakdown provided - flagging as ambiguous")
+        }
+        
+        // Check if any deduction lacks documentation
+        const undocumentedDeductions = deductionBreakdown.filter(d => !d.hasDocumentation)
+        if (undocumentedDeductions.length > 0) {
+          hasAmbiguousDeductions = true
+          console.log(`[v0] ⚠️ ${undocumentedDeductions.length} deduction(s) without documentation`)
+        }
+        
+        const result: BillFinancials = {
           calculatedLineItemsTotal: parsed.calculatedLineItemsTotal ?? 0,
           subtotal: parsed.subtotal ?? 0,
           discounts: parsed.discounts ?? 0,
@@ -562,7 +670,9 @@ Return ONLY valid JSON, no other text.`
           balanceDue: parsed.balanceDue ?? 0,
           lineItemsMatchSubtotal: parsed.lineItemsMatchSubtotal ?? null,
           duplicatesDetected: parsed.duplicatesDetected ?? 0,
-          rawText: text
+          rawText: text,
+          deductionBreakdown: deductionBreakdown,
+          hasAmbiguousDeductions: hasAmbiguousDeductions
         }
         console.log("[v0] ✓ Extracted financials:", result)
         
@@ -607,7 +717,9 @@ Return ONLY valid JSON, no other text.`
       balanceDue: 0,
       lineItemsMatchSubtotal: null,
       duplicatesDetected: 0,
-      rawText: ""
+      rawText: "",
+      deductionBreakdown: [],
+      hasAmbiguousDeductions: false
     }
   } catch (error) {
     console.error("[v0] Error in extractBillFinancials:", error)
@@ -621,8 +733,131 @@ Return ONLY valid JSON, no other text.`
       balanceDue: 0,
       lineItemsMatchSubtotal: null,
       duplicatesDetected: 0,
-      rawText: ""
+      rawText: "",
+      deductionBreakdown: [],
+      hasAmbiguousDeductions: false
     }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TWO-STEP VALIDATION FUNCTION
+// Step 1: Validate bill arithmetic (line items → subtotal → total)
+// Step 2: Validate all deductions with supporting documentation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function validateDeductions(financials: BillFinancials): DeductionValidation {
+  const issues: string[] = []
+  let verifiedAmount = 0
+  let unverifiedAmount = 0
+  
+  const deductionItems: DeductionItem[] = financials.deductionBreakdown || []
+  
+  // If we have aggregate deductions but no breakdown, create synthetic items
+  if (deductionItems.length === 0) {
+    const totalDeductions = financials.discounts + financials.payments + 
+      financials.hmoCoverage + financials.philhealthCoverage
+    
+    if (totalDeductions > 0) {
+      // Create unverified items for each deduction type
+      if (financials.discounts > 0) {
+        deductionItems.push({
+          type: 'discount',
+          amount: financials.discounts,
+          description: 'Discounts (unspecified)',
+          hasDocumentation: false,
+          isVerified: false,
+          verificationIssue: 'No breakdown provided - could be SC, PWD, or other discount'
+        })
+        issues.push(`⚠️ Discount of ₱${financials.discounts.toLocaleString()} applied without clear breakdown`)
+      }
+      
+      if (financials.payments > 0) {
+        deductionItems.push({
+          type: 'payment',
+          amount: financials.payments,
+          description: 'Payments/Deposits (unspecified)',
+          hasDocumentation: false,
+          isVerified: false,
+          verificationIssue: 'No receipt or reference number visible'
+        })
+        issues.push(`⚠️ Payment of ₱${financials.payments.toLocaleString()} without receipt reference`)
+      }
+      
+      if (financials.hmoCoverage > 0) {
+        deductionItems.push({
+          type: 'hmo',
+          amount: financials.hmoCoverage,
+          description: 'HMO/Company Coverage (unverified)',
+          hasDocumentation: false,
+          isVerified: false,
+          verificationIssue: 'No policy number or LOA visible - coverage not confirmed'
+        })
+        issues.push(`⚠️ HMO coverage of ₱${financials.hmoCoverage.toLocaleString()} claimed but not verified`)
+      }
+      
+      if (financials.philhealthCoverage > 0) {
+        deductionItems.push({
+          type: 'philhealth',
+          amount: financials.philhealthCoverage,
+          description: 'PhilHealth Coverage (unverified)',
+          hasDocumentation: false,
+          isVerified: false,
+          verificationIssue: 'No member ID or claim number visible'
+        })
+        issues.push(`⚠️ PhilHealth coverage of ₱${financials.philhealthCoverage.toLocaleString()} claimed but not verified`)
+      }
+    }
+  }
+  
+  // Calculate verified vs unverified amounts
+  for (const item of deductionItems) {
+    if (item.isVerified || item.hasDocumentation) {
+      verifiedAmount += item.amount
+    } else {
+      unverifiedAmount += item.amount
+      if (!item.verificationIssue) {
+        item.verificationIssue = 'Documentation not found'
+      }
+    }
+  }
+  
+  // Determine coverage status
+  let coverageStatus: 'confirmed' | 'unconfirmed' | 'no_coverage' | 'unknown' = 'unknown'
+  const hasCoverage = financials.hmoCoverage > 0 || financials.philhealthCoverage > 0
+  
+  if (!hasCoverage) {
+    coverageStatus = 'no_coverage'
+  } else {
+    const coverageItems = deductionItems.filter(d => d.type === 'hmo' || d.type === 'philhealth' || d.type === 'insurance')
+    const verifiedCoverage = coverageItems.filter(d => d.isVerified)
+    
+    if (verifiedCoverage.length === coverageItems.length && coverageItems.length > 0) {
+      coverageStatus = 'confirmed'
+    } else if (coverageItems.length > 0) {
+      coverageStatus = 'unconfirmed'
+      issues.push(`⚠️ COVERAGE NOT VERIFIED: Patient coverage is assumed but no documentation visible. Default assumption should be full payment.`)
+    }
+  }
+  
+  // Check for the problematic "PAYMENTS/DEPOSITS/DISCOUNTS" lumped together
+  const totalDeductions = financials.discounts + financials.payments + 
+    financials.hmoCoverage + financials.philhealthCoverage
+  
+  if (totalDeductions > 0 && deductionItems.every(d => !d.hasDocumentation)) {
+    issues.push(`❌ ALL DEDUCTIONS UNVERIFIED: ₱${totalDeductions.toLocaleString()} in deductions applied without visible documentation`)
+  }
+  
+  const validationPassed = issues.length === 0 && unverifiedAmount === 0
+  
+  return {
+    totalDeductions: verifiedAmount + unverifiedAmount,
+    verifiedDeductions: verifiedAmount,
+    unverifiedDeductions: unverifiedAmount,
+    deductionItems,
+    coverageStatus,
+    validationPassed,
+    issues
   }
 }
 
@@ -861,6 +1096,49 @@ export async function POST(request: NextRequest) {
     const hasFinancialData = financials.subtotal > 0 || financials.balanceDue >= 0
     const couldVerifyMath = hasFinancialData
     
+    // ═══════════════════════════════════════════════════════════════════
+    // STEP 2 OF TWO-STEP VALIDATION: DEDUCTION VERIFICATION
+    // "Question everything that reduces the amount owed"
+    // ═══════════════════════════════════════════════════════════════════
+    const deductionValidation = validateDeductions(financials)
+    
+    console.log("[v0] ═══ DEDUCTION VALIDATION ═══")
+    console.log(`[v0] Total deductions: ₱${deductionValidation.totalDeductions.toLocaleString()}`)
+    console.log(`[v0] Verified: ₱${deductionValidation.verifiedDeductions.toLocaleString()}`)
+    console.log(`[v0] Unverified: ₱${deductionValidation.unverifiedDeductions.toLocaleString()}`)
+    console.log(`[v0] Coverage status: ${deductionValidation.coverageStatus}`)
+    console.log(`[v0] Validation passed: ${deductionValidation.validationPassed}`)
+    if (deductionValidation.issues.length > 0) {
+      console.log(`[v0] Issues found:`)
+      deductionValidation.issues.forEach(issue => console.log(`[v0]   - ${issue}`))
+    }
+    
+    // Add deduction issues to math errors if there are unverified deductions
+    if (!deductionValidation.validationPassed && deductionValidation.unverifiedDeductions > 0) {
+      mathErrors.push({
+        name: "⚠️ UNVERIFIED DEDUCTIONS",
+        total: deductionValidation.unverifiedDeductions,
+        status: "warning" as const,
+        reason: `₱${deductionValidation.unverifiedDeductions.toLocaleString()} in deductions applied without visible documentation. Default assumption: Patient pays full amount unless coverage is proven.`,
+        expectedPrice: null,
+        impact: "requires_verification",
+      })
+      errorCount++
+    }
+    
+    // Add specific deduction issues as warnings
+    for (const item of deductionValidation.deductionItems) {
+      if (!item.isVerified && item.amount > 0) {
+        finalItems.push({
+          name: `📋 ${item.description}`,
+          total: item.amount,
+          status: "warning" as const,
+          reason: item.verificationIssue || 'Documentation not found - requires verification',
+          expectedPrice: null,
+        })
+      }
+    }
+    
     // Determine affected party and confidence
     let affectedParty: "hospital" | "patient" | "none" = "none"
     let confidence = 95
@@ -876,10 +1154,22 @@ export async function POST(request: NextRequest) {
     
     if (chargeStatus === "CORRECTLY_CHARGED" && couldVerifyMath) {
       overallMessage = `✅ CORRECTLY CHARGED - All calculations verified.\n\n`
-      overallMessage += `✓ Subtotal: Line items match bill's stated total\n`
-      overallMessage += `✓ Balance: All deductions properly applied\n`
-      overallMessage += `✓ Patient pays correct amount: ₱${financials.balanceDue.toLocaleString()}`
-      confidence = 100
+      overallMessage += `✓ Step 1: Subtotal matches line items\n`
+      overallMessage += `✓ Step 2: Balance calculation correct\n`
+      
+      // Add deduction validation status
+      if (deductionValidation.validationPassed) {
+        overallMessage += `✓ Deductions: ${deductionValidation.deductionItems.length > 0 ? 'All verified with documentation' : 'N/A - no deductions applied'}\n`
+      } else if (deductionValidation.unverifiedDeductions > 0) {
+        overallMessage += `\n⚠️ DEDUCTION ALERT:\n`
+        overallMessage += `₱${deductionValidation.unverifiedDeductions.toLocaleString()} in deductions lack documentation.\n`
+        for (const issue of deductionValidation.issues) {
+          overallMessage += `• ${issue}\n`
+        }
+      }
+      
+      overallMessage += `\n✓ Patient pays: ₱${financials.balanceDue.toLocaleString()}`
+      confidence = deductionValidation.validationPassed ? 100 : 85
     } else if (chargeStatus === "UNDERCHARGED") {
       overallMessage = `⚠️ UNDERCHARGED - Hospital loses ₱${totalDiscrepancy.toLocaleString()}\n\n`
       overallMessage += `Affected party: HOSPITAL (revenue loss)\n\n`
@@ -915,10 +1205,27 @@ export async function POST(request: NextRequest) {
       confidence = 50
     }
     
+    // Add deduction validation warnings to all messages
+    if (!deductionValidation.validationPassed && deductionValidation.issues.length > 0 && chargeStatus !== "CORRECTLY_CHARGED") {
+      overallMessage += `\n\n━━━ DEDUCTION VERIFICATION ISSUES ━━━\n`
+      for (const issue of deductionValidation.issues) {
+        overallMessage += `${issue}\n`
+      }
+      overallMessage += `\n💡 TIP: Request itemized breakdown of all deductions with supporting documents.`
+    }
+    
     // Check for AI-detected duplicates
     if (financials.duplicatesDetected > 0) {
       overallMessage += `\n\n⚠️ Note: ${financials.duplicatesDetected} potential duplicate line item(s) detected in bill structure`
       confidence = Math.min(confidence, 85)
+    }
+    
+    // Add coverage verification note
+    if (deductionValidation.coverageStatus === 'unconfirmed') {
+      overallMessage += `\n\n⚠️ COVERAGE STATUS: Unconfirmed`
+      overallMessage += `\nHMO/Insurance coverage appears to be applied but documentation is not visible.`
+      overallMessage += `\nDefault assumption: Patient should pay FULL amount unless coverage is proven.`
+      confidence = Math.min(confidence, 80)
     }
 
     const response = {
@@ -943,11 +1250,31 @@ export async function POST(request: NextRequest) {
       affectedParty: affectedParty,
       confidence: confidence,
       
+      // NEW: Deduction validation results (per improvement guidelines)
+      deductionValidation: {
+        totalDeductions: deductionValidation.totalDeductions,
+        verifiedDeductions: deductionValidation.verifiedDeductions,
+        unverifiedDeductions: deductionValidation.unverifiedDeductions,
+        coverageStatus: deductionValidation.coverageStatus,
+        validationPassed: deductionValidation.validationPassed,
+        issues: deductionValidation.issues,
+        deductionBreakdown: deductionValidation.deductionItems.map(item => ({
+          type: item.type,
+          amount: item.amount,
+          description: item.description,
+          hasDocumentation: item.hasDocumentation,
+          documentationType: item.documentationType,
+          documentationValue: item.documentationValue,
+          isVerified: item.isVerified,
+          verificationIssue: item.verificationIssue
+        }))
+      },
+      
       // Legacy fields
       totalMathErrors: totalDiscrepancy,
-      hasErrors: errorCount > 0,
+      hasErrors: errorCount > 0 || !deductionValidation.validationPassed,
       errorCount: errorCount,
-      warningCount: warningCount,
+      warningCount: warningCount + (deductionValidation.validationPassed ? 0 : deductionValidation.issues.length),
       duplicateCount: duplicateCount,
       couldVerifyMath: couldVerifyMath,
     }
