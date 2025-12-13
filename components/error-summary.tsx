@@ -6,15 +6,29 @@ import { Card } from "@/components/ui/card"
 
 interface BillItem {
   name: string
+  quantity?: number
+  unitPrice?: number
   total: number
   status: "fair" | "warning" | "overcharge" | "error"
   reason: string
+  expectedPrice?: number
 }
 
 interface AnalysisData {
   items: BillItem[]
-  totalOvercharge: number
+  overallAssessment: string
+  totalCharges: number
+  statedTotal?: number | null
+  billSubtotal?: number | null
+  discounts?: number | null
+  payments?: number | null
+  hmoCoverage?: number | null
+  philhealthCoverage?: number | null
+  totalMathErrors: number
   hasErrors: boolean
+  errorCount: number
+  duplicateCount?: number
+  couldVerifyMath?: boolean
 }
 
 interface ErrorSummaryProps {
@@ -57,8 +71,8 @@ export function ErrorSummary({ data, onGenerateEmail }: ErrorSummaryProps) {
           <div className="mt-6 pt-6 border-t border-border space-y-4">
             <div className="bg-red-50 dark:bg-red-950 p-4 rounded-lg border border-red-200 dark:border-red-800">
               <p className="text-sm text-red-900 dark:text-red-200">
-                <span className="font-semibold">Total Potential Overcharge:</span>
-                <span className="ml-2 text-lg font-bold">₱{data.totalOvercharge.toLocaleString()}</span>
+                <span className="font-semibold">Total Billing Errors:</span>
+                <span className="ml-2 text-lg font-bold">₱{data.totalMathErrors.toLocaleString()}</span>
               </p>
             </div>
 
