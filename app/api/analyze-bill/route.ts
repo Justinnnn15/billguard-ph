@@ -3,6 +3,21 @@ import { generateText } from "ai"
 import { createGroq } from "@ai-sdk/groq"
 import { createOpenAI } from "@ai-sdk/openai"
 import sharp from "sharp"
+import {
+  type ExtractedTotal,
+  type TotalHierarchy,
+  type DiscrepancyResult,
+  buildTotalHierarchy,
+  calculateDiscrepancy,
+  generateEnhancedExtractionPrompt,
+  logExtraction,
+  clearExtractionLogs,
+  getExtractionLogs,
+  GRAND_TOTAL_KEYWORDS,
+  SECTION_TOTAL_KEYWORDS,
+} from "@/lib/bill-extraction"
+// Note: Tesseract.js disabled due to pnpm module resolution issues
+// import { processHospitalBill, type ProcessingResult } from "@/lib/image-processing"
 
 // Initialize AI providers
 const groq = createGroq({ apiKey: process.env.GROQ_API_KEY })
@@ -46,7 +61,7 @@ const medicalKeywords = [
   'clinical', 'pulmonary', 'dept', 'section', 'supply'
 ]
 
-// Enhance image for better OCR - always run this first
+// Legacy enhance image function (keeping for fallback)
 async function enhanceImage(buffer: ArrayBuffer): Promise<{ enhanced: Buffer; mimeType: string }> {
   try {
     const inputBuffer = Buffer.from(buffer)
@@ -423,10 +438,10 @@ interface DeductionValidation {
   issues: string[]
 }
 
-// Extract full bill financial structure using Master Prompt v4.0
+// Extract full bill financial structure using Master Prompt v5.0
 interface BillFinancials {
   calculatedLineItemsTotal: number // AI's calculated sum (with duplicate prevention)
-  subtotal: number // Bill's stated total/subtotal
+  subtotal: number // Bill's GRAND TOTAL (verified, not intermediate subtotal)
   discounts: number // Total discounts (SC, PWD, etc.)
   payments: number // Cash/card payments made
   hmoCoverage: number // HMO/Company coverage amount
@@ -438,161 +453,109 @@ interface BillFinancials {
   // NEW: Deduction validation (per improvement guidelines)
   deductionBreakdown?: DeductionItem[]
   hasAmbiguousDeductions?: boolean
+  // NEW: Hierarchical total detection metadata
+  grandTotalVerification?: string // How the grand total was verified
+  sectionTotals?: Array<{ label: string; amount: number }> // Section totals found
+  allTotals?: Array<{ label: string; amount: number; level: string; position: number }> // All totals found
 }
 
 async function extractBillFinancials(enhancedBuffer: Buffer, enhancedMimeType: string): Promise<BillFinancials> {
+  // Clear logs for fresh extraction
+  clearExtractionLogs()
+  logExtraction('INIT', 'Starting bill financial extraction', { timestamp: new Date().toISOString() })
+  
   try {
     const base64 = enhancedBuffer.toString("base64")
     
-    const masterPromptV4 = `# Hospital Bill Validation System - Complete Analysis Prompt
+    // Use the enhanced extraction prompt from bill-extraction module
+    const enhancedPrompt = generateEnhancedExtractionPrompt()
+    
+    // Add the complete extraction instructions
+    const masterPromptV5 = `${enhancedPrompt}
 
-You are an expert hospital billing auditor. Your task is to extract bill data, perform mathematical validation, and determine if the patient was correctly charged, overcharged, or undercharged.
+## ADDITIONAL EXTRACTION REQUIREMENTS
 
-## Step-by-Step Process
+### STEP 1: Extract ALL Totals with Hierarchy
 
-### STEP 1: Extract Line Items with Hierarchy Understanding
+First, identify EVERY total/subtotal on the bill:
+1. List ALL amounts labeled as "total", "subtotal", "charges", etc.
+2. Classify each by level (line_item, category_subtotal, section_total, grand_total)
+3. Note the POSITION of each (line number or order of appearance)
 
-For each line in the charges section, classify as:
-- **CATEGORY_HEADER**: Label with no price (e.g., "ROOM AND BOARD")
-- **ACTUAL_CHARGE**: Line with a price amount
-- **SUB_ITEM**: Indented item under a category
+### STEP 2: Identify Section Totals
 
-**Rules:**
-1. If line has NO price → Mark as CATEGORY_HEADER, set count_in_sum = false
-2. If line is indented/bulleted under header → Mark as ACTUAL_CHARGE, count_in_sum = true
-3. If parent and child have same service name → Count child only, not parent
-4. Only sum items where count_in_sum = true
+Look for these specific section totals:
+- "Total Hospital Charges" or "Hospital Charges"
+- "Total Professional Fees" or "Professional Fees"
+- "Total Ward Charges"
+- "Total Room and Board"
 
-### STEP 2: Calculate Line Items Total
+These are INTERMEDIATE totals, NOT the grand total!
 
-**YOU MUST CALCULATE THIS:**
-\`\`\`
-calculated_line_items_total = SUM of all items where count_in_sum = true
-\`\`\`
+### STEP 3: Find the TRUE Grand Total
 
-### STEP 3: Extract Bill's Stated Subtotal
+The GRAND TOTAL should:
+✓ Equal the SUM of all section totals
+✓ Be labeled with keywords like "GRAND TOTAL", "AMOUNT DUE", "TOTAL AMOUNT"
+✓ Appear AFTER all section totals
+✓ Be the LARGEST total (before deductions)
 
-Find the hospital's printed subtotal (look for these labels):
-- "Total Hospital Charges"
-- "Hospital Bill"
-- "Total Bill"
-- "Subtotal"
-- "Total Amount"
+### STEP 4: Extract Deductions
 
-### STEP 4: Extract ALL Discounts
-
-Look for:
-- Senior Citizen (SC) discounts
-- PWD discounts
-- PhilHealth deductions (listed as discount, not coverage)
-- VAT exemptions
-- Other adjustments
-- Look for "Less:" or negative amounts
-
-**CRITICAL**: Distinguish between:
-- **Discounts**: Reductions from subtotal (SC, PWD, VAT exempt)
-- **Coverage**: Third-party payments (HMO, PhilHealth reimbursement)
-
-### STEP 5: Extract ALL Payments & Third-Party Coverage
-
-**CRITICAL - Look for these indicators:**
-
-1. **"Due from Patient" vs "Total Bill" difference**
-   - If Total Bill = ₱139,270.95 and Due from Patient = ₱127,270.95
-   - Difference = ₱12,000 = PAYMENT/COVERAGE already applied
-
-2. **Explicit sections:**
-   - "PAYMENTS/DEPOSITS/DISCOUNTS"
-   - "HMO/COMPANY"
-   - "Less: Payments Made"
-   - "PhilHealth Coverage"
-
-3. **Visual indicators:**
-   - Amounts in parentheses: (₱12,000)
-   - "Less:" prefix
-   - Negative amounts in payment section
-
-### STEP 6: Extract Patient's Stated Balance
-
-Find the amount patient is supposed to pay (look for):
-- "Due from Patient"
-- "Please Pay This Amount"
-- "Balance Due"
-- "Net Amount Due"
-- "Patient Responsibility"
-
-### STEP 7: DEDUCTION VALIDATION (CRITICAL)
-
-**CORE PRINCIPLE**: Never assume deductions are legitimate without clear documentation.
-**DEFAULT ASSUMPTION**: Patient pays FULL amount unless coverage is PROVEN.
-
-For EACH deduction found, you MUST determine:
-1. **Type**: Is it HMO, PhilHealth, Insurance, SC/PWD Discount, Deposit, or Payment?
-2. **Documentation**: Is there a reference number, policy number, receipt, or approval code?
-3. **Authorization**: Who authorized this deduction? (Company name, policy holder, etc.)
-
-**FLAG AS AMBIGUOUS** if you see:
-- "PAYMENTS/DEPOSITS/DISCOUNTS" lumped together without breakdown
-- Deductions without clear labels
-- Coverage applied without policy/member numbers visible
-- Large deductions without explanation
+For each deduction, identify:
+- Type (discount, payment, HMO, PhilHealth)
+- Amount
+- Documentation (policy number, receipt, ID)
+- Whether it's verified or assumed
 
 ### OUTPUT FORMAT (JSON ONLY):
 
 \`\`\`json
 {
-  "calculatedLineItemsTotal": 57074.71,
-  "subtotal": 56325.00,
-  "discounts": 1240.00,
-  "hmoCoverage": 12000.00,
-  "philhealthCoverage": 0.00,
-  "payments": 4960.00,
-  "balanceDue": 38125.00,
-  "lineItemsMatchSubtotal": false,
-  "duplicatesDetected": 0,
-  "deductionBreakdown": [
-    {
-      "type": "discount",
-      "amount": 1240.00,
-      "description": "Senior Citizen Discount",
-      "hasDocumentation": true,
-      "documentationType": "id_number",
-      "documentationValue": "SC ID #123456"
-    },
-    {
-      "type": "hmo",
-      "amount": 12000.00,
-      "description": "HMO Coverage",
-      "hasDocumentation": false,
-      "documentationType": "none",
-      "documentationValue": null
-    }
+  "allTotals": [
+    {"label": "Total Hospital Charges", "amount": 20044.00, "level": "section_total", "position": 1},
+    {"label": "Total Professional Fees", "amount": 5000.00, "level": "section_total", "position": 2},
+    {"label": "GRAND TOTAL", "amount": 25044.00, "level": "grand_total", "position": 3}
   ],
-  "hasAmbiguousDeductions": true
+  "grandTotal": {
+    "label": "GRAND TOTAL",
+    "amount": 25044.00,
+    "confidence": 95,
+    "verification": "equals Hospital Charges (20044) + Professional Fees (5000)"
+  },
+  "sectionTotals": [
+    {"label": "Total Hospital Charges", "amount": 20044.00},
+    {"label": "Total Professional Fees", "amount": 5000.00}
+  ],
+  "calculatedLineItemsTotal": 25044.00,
+  "subtotal": 25044.00,
+  "discounts": 0.00,
+  "payments": 0.00,
+  "hmoCoverage": 0.00,
+  "philhealthCoverage": 0.00,
+  "balanceDue": 25044.00,
+  "lineItemsMatchSubtotal": true,
+  "duplicatesDetected": 0,
+  "deductionBreakdown": [],
+  "hasAmbiguousDeductions": false
 }
 \`\`\`
 
-**CRITICAL RULES**:
-1. calculatedLineItemsTotal = YOUR calculated sum (count_in_sum=true items only)
-2. subtotal = what the BILL states as subtotal/total
-3. discounts = ALL discounts (SC, PWD, VAT, etc.)
-4. hmoCoverage = HMO/Company/Insurance payments
-5. philhealthCoverage = PhilHealth reimbursements
-6. payments = Cash/card payments already made
-7. balanceDue = What patient must pay NOW
-8. lineItemsMatchSubtotal = true if |calculatedLineItemsTotal - subtotal| <= 10
-9. duplicatesDetected = number of duplicate line items found
-10. Use 0.00 (not null) for fields not found
-11. deductionBreakdown = Array of each individual deduction with documentation status
-12. hasAmbiguousDeductions = true if ANY deduction lacks clear documentation/breakdown
-
-**VALIDATION CHECKS YOU MUST DO**:
-1. Does calculatedLineItemsTotal match subtotal? (within ₱10)
-2. Does: subtotal - discounts - payments - hmoCoverage - philhealthCoverage = balanceDue? (within ₱10)
+**CRITICAL REMINDERS:**
+🚨 If Hospital Charges = ₱20,044 and Professional Fees = ₱5,000 exist, GRAND TOTAL MUST be ₱25,044!
+🚨 NEVER report an intermediate subtotal as the grand total
+🚨 The "subtotal" field must be the GRAND TOTAL (sum of all sections), not a section subtotal
+🚨 Always verify by checking if section totals sum to your reported grand total
 
 Return ONLY valid JSON, no other text.`
 
-    console.log("[v0] Extracting financial structure with Master Prompt v4.0 (100% Accuracy Focus)...")
+    logExtraction('PROMPT', 'Using enhanced Master Prompt v5.0 with hierarchical total detection', {
+      promptLength: masterPromptV5.length,
+      grandTotalKeywords: GRAND_TOTAL_KEYWORDS.slice(0, 5),
+      sectionTotalKeywords: SECTION_TOTAL_KEYWORDS.slice(0, 5)
+    })
+    
+    console.log("[v0] Extracting financial structure with Master Prompt v5.0 (Hierarchical Total Detection)...")
     
     // Use Groq vision
     try {
@@ -609,7 +572,7 @@ Return ONLY valid JSON, no other text.`
               },
               {
                 type: "text",
-                text: masterPromptV4,
+                text: masterPromptV5,
               },
             ],
           },
@@ -617,11 +580,67 @@ Return ONLY valid JSON, no other text.`
       })
 
       console.log("[v0] Groq financial response:", text)
+      logExtraction('AI_RESPONSE', 'Received AI response', { responseLength: text.length })
       
       // Try to match the full JSON object including nested arrays
       const jsonMatch = text.match(/\{[\s\S]*\}/)
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0])
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // HIERARCHICAL TOTAL VALIDATION (NEW)
+        // Verify that the extracted subtotal is truly the GRAND TOTAL
+        // ═══════════════════════════════════════════════════════════════════
+        
+        let verifiedSubtotal = parsed.subtotal ?? 0
+        let grandTotalVerification = ''
+        
+        // Check if we have section totals that should sum to grand total
+        if (parsed.sectionTotals && Array.isArray(parsed.sectionTotals) && parsed.sectionTotals.length >= 2) {
+          const sectionSum = parsed.sectionTotals.reduce((sum: number, t: any) => sum + (t.amount || 0), 0)
+          
+          logExtraction('HIERARCHY', 'Checking section totals', {
+            sectionTotals: parsed.sectionTotals,
+            sectionSum,
+            reportedSubtotal: parsed.subtotal
+          })
+          
+          // If reported subtotal doesn't match section sum, there's a problem
+          if (Math.abs(verifiedSubtotal - sectionSum) > 10) {
+            console.log(`[v0] ⚠️ GRAND TOTAL MISMATCH DETECTED!`)
+            console.log(`[v0]   Reported subtotal: ₱${verifiedSubtotal.toLocaleString()}`)
+            console.log(`[v0]   Section totals sum: ₱${sectionSum.toLocaleString()}`)
+            
+            // The section sum is likely the correct grand total
+            verifiedSubtotal = sectionSum
+            grandTotalVerification = `CORRECTED: Using sum of section totals (₱${sectionSum.toLocaleString()}) instead of reported ₱${parsed.subtotal}`
+            
+            logExtraction('CORRECTION', 'Corrected grand total using section sum', {
+              original: parsed.subtotal,
+              corrected: sectionSum,
+              reason: 'Section totals sum to different amount'
+            }, true)
+          }
+        }
+        
+        // Check if grandTotal object was explicitly provided
+        if (parsed.grandTotal && typeof parsed.grandTotal === 'object') {
+          const explicitGrandTotal = parsed.grandTotal.amount || 0
+          
+          logExtraction('GRAND_TOTAL', 'Explicit grand total found', {
+            label: parsed.grandTotal.label,
+            amount: explicitGrandTotal,
+            confidence: parsed.grandTotal.confidence,
+            verification: parsed.grandTotal.verification
+          })
+          
+          // Use explicit grand total if it's larger than current subtotal
+          if (explicitGrandTotal > verifiedSubtotal && Math.abs(explicitGrandTotal - verifiedSubtotal) > 10) {
+            console.log(`[v0] ✓ Using explicit grand total: ₱${explicitGrandTotal.toLocaleString()} (was ₱${verifiedSubtotal.toLocaleString()})`)
+            verifiedSubtotal = explicitGrandTotal
+            grandTotalVerification = `From explicit grand total: "${parsed.grandTotal.label}"`
+          }
+        }
         
         // Process deduction breakdown if present
         const deductionBreakdown: DeductionItem[] = []
@@ -660,9 +679,12 @@ Return ONLY valid JSON, no other text.`
           console.log(`[v0] ⚠️ ${undocumentedDeductions.length} deduction(s) without documentation`)
         }
         
+        // ═══════════════════════════════════════════════════════════════════
+        // USE VERIFIED SUBTOTAL (GRAND TOTAL) - This is the key fix!
+        // ═══════════════════════════════════════════════════════════════════
         const result: BillFinancials = {
           calculatedLineItemsTotal: parsed.calculatedLineItemsTotal ?? 0,
-          subtotal: parsed.subtotal ?? 0,
+          subtotal: verifiedSubtotal, // USE VERIFIED GRAND TOTAL, not raw parsed.subtotal
           discounts: parsed.discounts ?? 0,
           payments: parsed.payments ?? 0,
           hmoCoverage: parsed.hmoCoverage ?? 0,
@@ -672,27 +694,62 @@ Return ONLY valid JSON, no other text.`
           duplicatesDetected: parsed.duplicatesDetected ?? 0,
           rawText: text,
           deductionBreakdown: deductionBreakdown,
-          hasAmbiguousDeductions: hasAmbiguousDeductions
+          hasAmbiguousDeductions: hasAmbiguousDeductions,
+          // Store extraction metadata for audit
+          grandTotalVerification: grandTotalVerification,
+          sectionTotals: parsed.sectionTotals || [],
+          allTotals: parsed.allTotals || [],
         }
-        console.log("[v0] ✓ Extracted financials:", result)
+        
+        // Comprehensive logging
+        console.log("[v0] ═══════════════════════════════════════════")
+        console.log("[v0] BILL FINANCIAL EXTRACTION COMPLETE")
+        console.log("[v0] ═══════════════════════════════════════════")
+        console.log(`[v0] Grand Total (verified): ₱${verifiedSubtotal.toLocaleString()}`)
+        if (grandTotalVerification) {
+          console.log(`[v0] Verification: ${grandTotalVerification}`)
+        }
+        if (parsed.sectionTotals && parsed.sectionTotals.length > 0) {
+          console.log(`[v0] Section totals found:`)
+          parsed.sectionTotals.forEach((t: any) => {
+            console.log(`[v0]   - ${t.label}: ₱${(t.amount || 0).toLocaleString()}`)
+          })
+        }
+        console.log(`[v0] Calculated line items total: ₱${result.calculatedLineItemsTotal.toLocaleString()}`)
+        console.log(`[v0] Balance due: ₱${result.balanceDue.toLocaleString()}`)
+        console.log("[v0] ═══════════════════════════════════════════")
+        
+        logExtraction('RESULT', 'Financial extraction complete', {
+          grandTotal: verifiedSubtotal,
+          verification: grandTotalVerification,
+          sectionTotalsCount: (parsed.sectionTotals || []).length,
+          hasDeductions: totalDeductionsAmount > 0,
+          hasAmbiguousDeductions
+        })
         
         // Log duplicate detection
         if (result.duplicatesDetected && result.duplicatesDetected > 0) {
           console.log(`[v0] ⚠️ AI detected ${result.duplicatesDetected} potential duplicate(s)`)
+          logExtraction('DUPLICATES', 'Duplicates detected', { count: result.duplicatesDetected }, false)
         }
         
         // Log line items vs subtotal match
         if (result.calculatedLineItemsTotal && result.subtotal) {
           const diff = Math.abs(result.calculatedLineItemsTotal - result.subtotal)
           if (diff > 100) {
-            console.log(`[v0] ⚠️ Line items calculation (₱${result.calculatedLineItemsTotal}) differs from stated subtotal (₱${result.subtotal}) by ₱${diff}`)
+            console.log(`[v0] ⚠️ Line items calculation (₱${result.calculatedLineItemsTotal}) differs from grand total (₱${result.subtotal}) by ₱${diff}`)
+            logExtraction('MISMATCH', 'Line items vs grand total mismatch', {
+              calculatedLineItems: result.calculatedLineItemsTotal,
+              grandTotal: result.subtotal,
+              difference: diff
+            }, false)
           } else {
-            console.log(`[v0] ✓ Line items match subtotal (within ₱${diff})`)
+            console.log(`[v0] ✓ Line items match grand total (within ₱${diff})`)
           }
         }
         
         // Log the payment breakdown for debugging
-        if (result.subtotal && result.balanceDue) {
+        if (result.subtotal && result.balanceDue >= 0) {
           const totalDeductions = (result.discounts || 0) + (result.payments || 0) + (result.hmoCoverage || 0) + (result.philhealthCoverage || 0)
           console.log(`[v0] Payment breakdown: ₱${result.subtotal} - ₱${totalDeductions} = ₱${result.balanceDue}`)
         }
@@ -703,6 +760,7 @@ Return ONLY valid JSON, no other text.`
       throw new Error("Could not parse JSON")
     } catch (groqError: any) {
       console.log("[v0] Groq vision failed for financials:", groqError?.message)
+      logExtraction('ERROR', 'Groq vision failed', { error: groqError?.message }, false)
     }
     
     // No financial data extracted
@@ -870,53 +928,73 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 })
     }
 
+    console.log("[v0] ═══════════════════════════════════════════════════════════════")
+    console.log("[v0] BILLGUARD ANALYSIS STARTED")
+    console.log("[v0] ═══════════════════════════════════════════════════════════════")
     console.log("[v0] Processing file:", file.name, file.type)
 
-    // Step 1: Enhance image
     const buffer = await file.arrayBuffer()
+    const inputBuffer = Buffer.from(buffer)
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Skip Tesseract.js (has module resolution issues with pnpm)
+    // Using AI Vision extraction instead (more reliable in this environment)
+    // ═══════════════════════════════════════════════════════════════════════════
+    console.log("[v0] Step 1: Enhancing image with Sharp...")
+    
     const { enhanced, mimeType: enhancedMimeType } = await enhanceImage(buffer)
     
-    // Step 2: Extract line items AND financial structure (in parallel)
-    console.log("[v0] Extracting items and financial structure in parallel...")
-    const [billText, financials] = await Promise.all([
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Step 2: Use AI Vision for text extraction and financial parsing
+    // ═══════════════════════════════════════════════════════════════════════════
+    console.log("[v0] Step 2: Running AI Vision extraction...")
+    
+    const [billText, aiFinancials] = await Promise.all([
       extractTextFromFile(file),
       extractBillFinancials(enhanced, enhancedMimeType)
     ])
     
-    console.log("[v0] Extracted text:", billText)
-    console.log("[v0] Bill financials:", financials)
+    console.log("[v0] AI Vision completed:")
+    console.log(`[v0]   - Subtotal: ₱${aiFinancials.subtotal?.toLocaleString() || 'not found'}`)
+    console.log(`[v0]   - Balance Due: ₱${aiFinancials.balanceDue?.toLocaleString() || 'not found'}`)
+    console.log(`[v0]   - Line items total: ₱${aiFinancials.calculatedLineItemsTotal?.toLocaleString() || 'not found'}`)
     
-    // Step 2.5: If financial extraction failed, try text-based parsing as fallback
-    if (financials.subtotal === null && financials.balanceDue === null && billText) {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Step 3: Use AI results (Tesseract disabled)
+    // ═══════════════════════════════════════════════════════════════════════════
+    console.log("[v0] Step 3: Processing financial data...")
+    
+    let finalFinancials = aiFinancials
+    
+    // Fallback: If AI extraction failed, try text-based parsing
+    if ((finalFinancials.subtotal === 0 || finalFinancials.subtotal === null) && billText) {
       console.log("[v0] Trying text-based financial extraction as fallback...")
       
-      // Look for common patterns in extracted text
-      const lines = billText.toLowerCase().split('\n')
+      const textLines = billText.toLowerCase().split('\n')
       let foundSubtotal = null
       let foundBalance = null
       let foundDiscount = null
       let foundPayment = null
       
-      for (const line of lines) {
-        // Match subtotal patterns
-        if (line.includes('subtotal') || line.includes('gross total') || line.includes('total charges')) {
+      for (const line of textLines) {
+        if (line.includes('subtotal') || line.includes('gross total') || line.includes('total charges') || line.includes('grand total')) {
           const match = line.match(/₱?\s*([\d,]+\.?\d*)/)
-          if (match) foundSubtotal = Number.parseFloat(match[1].replace(/,/g, ''))
+          if (match) {
+            const value = Number.parseFloat(match[1].replace(/,/g, ''))
+            if (value > (foundSubtotal || 0)) foundSubtotal = value
+          }
         }
         
-        // Match balance due patterns
         if (line.includes('balance due') || line.includes('amount due') || line.includes('net amount')) {
           const match = line.match(/₱?\s*([\d,]+\.?\d*)/)
           if (match) foundBalance = Number.parseFloat(match[1].replace(/,/g, ''))
         }
         
-        // Match discount patterns
         if (line.includes('discount') || line.includes('less:')) {
           const match = line.match(/₱?\s*([\d,]+\.?\d*)/)
           if (match) foundDiscount = Number.parseFloat(match[1].replace(/,/g, ''))
         }
         
-        // Match payment patterns
         if (line.includes('payment') || line.includes('paid')) {
           const match = line.match(/₱?\s*([\d,]+\.?\d*)/)
           if (match) foundPayment = Number.parseFloat(match[1].replace(/,/g, ''))
@@ -924,20 +1002,24 @@ export async function POST(request: NextRequest) {
       }
       
       if (foundSubtotal || foundBalance) {
-        financials.subtotal = foundSubtotal || 0
-        financials.balanceDue = foundBalance || 0
-        financials.discounts = foundDiscount || 0
-        financials.payments = foundPayment || 0
-        financials.hmoCoverage = 0
-        financials.philhealthCoverage = 0
-        financials.calculatedLineItemsTotal = 0
-        financials.lineItemsMatchSubtotal = null
-        financials.duplicatesDetected = 0
-        console.log("[v0] ✓ Extracted via text parsing:", financials)
+        finalFinancials.subtotal = foundSubtotal || finalFinancials.subtotal || 0
+        finalFinancials.balanceDue = foundBalance || finalFinancials.balanceDue || 0
+        finalFinancials.discounts = foundDiscount || finalFinancials.discounts || 0
+        finalFinancials.payments = foundPayment || finalFinancials.payments || 0
+        console.log("[v0] ✓ Extracted via text parsing:", {
+          subtotal: finalFinancials.subtotal,
+          balanceDue: finalFinancials.balanceDue
+        })
       }
     }
+    
+    console.log("[v0] Final financials to use:")
+    console.log(`[v0]   - Subtotal/Grand Total: ₱${finalFinancials.subtotal?.toLocaleString()}`)
+    console.log(`[v0]   - Discounts: ₱${finalFinancials.discounts?.toLocaleString()}`)
+    console.log(`[v0]   - Payments: ₱${finalFinancials.payments?.toLocaleString()}`)
+    console.log(`[v0]   - Balance Due: ₱${finalFinancials.balanceDue?.toLocaleString()}`)
 
-    // Step 3: Analyze with AI
+    // Step 4: Analyze with AI (for duplicate detection, etc.)
     const analysis = await analyzeBillWithAI(billText)
 
     // Step 4: Calculate OUR total from the extracted items
@@ -973,12 +1055,12 @@ export async function POST(request: NextRequest) {
     // ═══════════════════════════════════════════════════════════════════
     let subtotalStatus: "CORRECT" | "UNDERCHARGED_SUBTOTAL" | "OVERCHARGED_SUBTOTAL" = "CORRECT"
     
-    if (financials.subtotal > 0 && calculatedSubtotal > 0) {
-      const subtotalDiff = calculatedSubtotal - financials.subtotal
+    if (finalFinancials.subtotal > 0 && calculatedSubtotal > 0) {
+      const subtotalDiff = calculatedSubtotal - finalFinancials.subtotal
       
       console.log("[v0] ═══ SUBTOTAL VERIFICATION ═══")
       console.log(`[v0] Our calculated line items total: ₱${calculatedSubtotal.toLocaleString()}`)
-      console.log(`[v0] Bill's stated subtotal: ₱${financials.subtotal.toLocaleString()}`)
+      console.log(`[v0] Bill's stated subtotal: ₱${finalFinancials.subtotal.toLocaleString()}`)
       console.log(`[v0] Difference: ₱${subtotalDiff.toLocaleString()}`)
       
       if (Math.abs(subtotalDiff) > 10) {
@@ -987,9 +1069,9 @@ export async function POST(request: NextRequest) {
           subtotalStatus = "UNDERCHARGED_SUBTOTAL"
           mathErrors.push({
             name: "⚠️ SUBTOTAL UNDERCHARGE",
-            total: financials.subtotal,
+            total: finalFinancials.subtotal,
             status: "error" as const,
-            reason: `Line items sum to ₱${calculatedSubtotal.toLocaleString()} but bill shows ₱${financials.subtotal.toLocaleString()}. Hospital undercharged by ₱${Math.abs(subtotalDiff).toLocaleString()}. This is a revenue loss for the hospital.`,
+            reason: `Line items sum to ₱${calculatedSubtotal.toLocaleString()} but bill shows ₱${finalFinancials.subtotal.toLocaleString()}. Hospital undercharged by ₱${Math.abs(subtotalDiff).toLocaleString()}. This is a revenue loss for the hospital.`,
             expectedPrice: calculatedSubtotal,
             impact: "hospital",
           })
@@ -998,9 +1080,9 @@ export async function POST(request: NextRequest) {
           subtotalStatus = "OVERCHARGED_SUBTOTAL"
           mathErrors.push({
             name: "⚠️ SUBTOTAL OVERCHARGE",
-            total: financials.subtotal,
+            total: finalFinancials.subtotal,
             status: "error" as const,
-            reason: `Line items sum to ₱${calculatedSubtotal.toLocaleString()} but bill shows ₱${financials.subtotal.toLocaleString()}. Hospital overcharged by ₱${Math.abs(subtotalDiff).toLocaleString()}. Patient is being charged MORE than itemized services.`,
+            reason: `Line items sum to ₱${calculatedSubtotal.toLocaleString()} but bill shows ₱${finalFinancials.subtotal.toLocaleString()}. Hospital overcharged by ₱${Math.abs(subtotalDiff).toLocaleString()}. Patient is being charged MORE than itemized services.`,
             expectedPrice: calculatedSubtotal,
             impact: "patient",
           })
@@ -1018,37 +1100,37 @@ export async function POST(request: NextRequest) {
     // ═══════════════════════════════════════════════════════════════════
     let balanceStatus: "CORRECT" | "PATIENT_UNDERCHARGED" | "PATIENT_OVERCHARGED" = "CORRECT"
     
-    if (financials.subtotal > 0 && financials.balanceDue >= 0) {
+    if (finalFinancials.subtotal > 0 && finalFinancials.balanceDue >= 0) {
       // Use the BILL's stated subtotal for balance calculation (not our calculated one)
-      const totalDeductions = financials.discounts + financials.payments + financials.hmoCoverage + financials.philhealthCoverage
-      const calculatedBalance = financials.subtotal - totalDeductions
-      const balanceDiff = calculatedBalance - financials.balanceDue
+      const totalDeductions = finalFinancials.discounts + finalFinancials.payments + finalFinancials.hmoCoverage + finalFinancials.philhealthCoverage
+      const calculatedBalance = finalFinancials.subtotal - totalDeductions
+      const balanceDiff = calculatedBalance - finalFinancials.balanceDue
       
       console.log("[v0] ═══ BALANCE VERIFICATION ═══")
-      console.log(`[v0] Bill subtotal: ₱${financials.subtotal.toLocaleString()}`)
-      console.log(`[v0] - Discounts: ₱${financials.discounts.toLocaleString()}`)
-      console.log(`[v0] - Payments: ₱${financials.payments.toLocaleString()}`)
-      console.log(`[v0] - HMO Coverage: ₱${financials.hmoCoverage.toLocaleString()}`)
-      console.log(`[v0] - PhilHealth: ₱${financials.philhealthCoverage.toLocaleString()}`)
+      console.log(`[v0] Bill subtotal: ₱${finalFinancials.subtotal.toLocaleString()}`)
+      console.log(`[v0] - Discounts: ₱${finalFinancials.discounts.toLocaleString()}`)
+      console.log(`[v0] - Payments: ₱${finalFinancials.payments.toLocaleString()}`)
+      console.log(`[v0] - HMO Coverage: ₱${finalFinancials.hmoCoverage.toLocaleString()}`)
+      console.log(`[v0] - PhilHealth: ₱${finalFinancials.philhealthCoverage.toLocaleString()}`)
       console.log(`[v0] = Calculated balance: ₱${calculatedBalance.toLocaleString()}`)
-      console.log(`[v0] Bill states: ₱${financials.balanceDue.toLocaleString()}`)
+      console.log(`[v0] Bill states: ₱${finalFinancials.balanceDue.toLocaleString()}`)
       console.log(`[v0] Difference: ₱${balanceDiff.toLocaleString()}`)
       
       if (Math.abs(balanceDiff) > 10) {
         const deductionBreakdown = []
-        if (financials.discounts > 0) deductionBreakdown.push(`₱${financials.discounts.toLocaleString()} discounts`)
-        if (financials.payments > 0) deductionBreakdown.push(`₱${financials.payments.toLocaleString()} payments`)
-        if (financials.hmoCoverage > 0) deductionBreakdown.push(`₱${financials.hmoCoverage.toLocaleString()} HMO`)
-        if (financials.philhealthCoverage > 0) deductionBreakdown.push(`₱${financials.philhealthCoverage.toLocaleString()} PhilHealth`)
+        if (finalFinancials.discounts > 0) deductionBreakdown.push(`₱${finalFinancials.discounts.toLocaleString()} discounts`)
+        if (finalFinancials.payments > 0) deductionBreakdown.push(`₱${finalFinancials.payments.toLocaleString()} payments`)
+        if (finalFinancials.hmoCoverage > 0) deductionBreakdown.push(`₱${finalFinancials.hmoCoverage.toLocaleString()} HMO`)
+        if (finalFinancials.philhealthCoverage > 0) deductionBreakdown.push(`₱${finalFinancials.philhealthCoverage.toLocaleString()} PhilHealth`)
         
         if (balanceDiff > 0) {
           // Calculated > Stated = Patient undercharged (paying less)
           balanceStatus = "PATIENT_UNDERCHARGED"
           mathErrors.push({
             name: "⚠️ PATIENT BALANCE UNDERCHARGE",
-            total: financials.balanceDue,
+            total: finalFinancials.balanceDue,
             status: "error" as const,
-            reason: `Balance should be: ₱${financials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${calculatedBalance.toLocaleString()}, but bill shows ₱${financials.balanceDue.toLocaleString()}. Patient is paying ₱${Math.abs(balanceDiff).toLocaleString()} LESS than they should (hospital loses money).`,
+            reason: `Balance should be: ₱${finalFinancials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${calculatedBalance.toLocaleString()}, but bill shows ₱${finalFinancials.balanceDue.toLocaleString()}. Patient is paying ₱${Math.abs(balanceDiff).toLocaleString()} LESS than they should (hospital loses money).`,
             expectedPrice: calculatedBalance,
             impact: "hospital",
           })
@@ -1057,9 +1139,9 @@ export async function POST(request: NextRequest) {
           balanceStatus = "PATIENT_OVERCHARGED"
           mathErrors.push({
             name: "⚠️ PATIENT BALANCE OVERCHARGE",
-            total: financials.balanceDue,
+            total: finalFinancials.balanceDue,
             status: "error" as const,
-            reason: `Balance should be: ₱${financials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${calculatedBalance.toLocaleString()}, but bill shows ₱${financials.balanceDue.toLocaleString()}. Patient is paying ₱${Math.abs(balanceDiff).toLocaleString()} MORE than they should.`,
+            reason: `Balance should be: ₱${finalFinancials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${calculatedBalance.toLocaleString()}, but bill shows ₱${finalFinancials.balanceDue.toLocaleString()}. Patient is paying ₱${Math.abs(balanceDiff).toLocaleString()} MORE than they should.`,
             expectedPrice: calculatedBalance,
             impact: "patient",
           })
@@ -1093,14 +1175,14 @@ export async function POST(request: NextRequest) {
     const finalItems = [...mathErrors, ...analysis.items]
     
     // Check if we have financial data to verify calculations
-    const hasFinancialData = financials.subtotal > 0 || financials.balanceDue >= 0
+    const hasFinancialData = finalFinancials.subtotal > 0 || finalFinancials.balanceDue >= 0
     const couldVerifyMath = hasFinancialData
     
     // ═══════════════════════════════════════════════════════════════════
     // STEP 2 OF TWO-STEP VALIDATION: DEDUCTION VERIFICATION
     // "Question everything that reduces the amount owed"
     // ═══════════════════════════════════════════════════════════════════
-    const deductionValidation = validateDeductions(financials)
+    const deductionValidation = validateDeductions(finalFinancials)
     
     console.log("[v0] ═══ DEDUCTION VALIDATION ═══")
     console.log(`[v0] Total deductions: ₱${deductionValidation.totalDeductions.toLocaleString()}`)
@@ -1168,14 +1250,14 @@ export async function POST(request: NextRequest) {
         }
       }
       
-      overallMessage += `\n✓ Patient pays: ₱${financials.balanceDue.toLocaleString()}`
+      overallMessage += `\n✓ Patient pays: ₱${finalFinancials.balanceDue.toLocaleString()}`
       confidence = deductionValidation.validationPassed ? 100 : 85
     } else if (chargeStatus === "UNDERCHARGED") {
       overallMessage = `⚠️ UNDERCHARGED - Hospital loses ₱${totalDiscrepancy.toLocaleString()}\n\n`
       overallMessage += `Affected party: HOSPITAL (revenue loss)\n\n`
       
       if (subtotalStatus === "UNDERCHARGED_SUBTOTAL") {
-        overallMessage += `• Subtotal Issue: Bill shows ₱${financials.subtotal.toLocaleString()} but line items sum to ₱${calculatedSubtotal.toLocaleString()}\n`
+        overallMessage += `• Subtotal Issue: Bill shows ₱${finalFinancials.subtotal.toLocaleString()} but line items sum to ₱${calculatedSubtotal.toLocaleString()}\n`
       }
       if (balanceStatus === "PATIENT_UNDERCHARGED") {
         overallMessage += `• Balance Issue: Patient paying ₱${Math.abs(totalDiscrepancy).toLocaleString()} less than they should\n`
@@ -1188,7 +1270,7 @@ export async function POST(request: NextRequest) {
       overallMessage += `Affected party: PATIENT (overpayment)\n\n`
       
       if (subtotalStatus === "OVERCHARGED_SUBTOTAL") {
-        overallMessage += `• Subtotal Issue: Bill shows ₱${financials.subtotal.toLocaleString()} but line items only sum to ₱${financials.calculatedLineItemsTotal.toLocaleString()}\n`
+        overallMessage += `• Subtotal Issue: Bill shows ₱${finalFinancials.subtotal.toLocaleString()} but line items only sum to ₱${finalFinancials.calculatedLineItemsTotal.toLocaleString()}\n`
       }
       if (balanceStatus === "PATIENT_OVERCHARGED") {
         overallMessage += `• Balance Issue: Patient paying ₱${Math.abs(totalDiscrepancy).toLocaleString()} more than they should\n`
@@ -1215,8 +1297,8 @@ export async function POST(request: NextRequest) {
     }
     
     // Check for AI-detected duplicates
-    if (financials.duplicatesDetected > 0) {
-      overallMessage += `\n\n⚠️ Note: ${financials.duplicatesDetected} potential duplicate line item(s) detected in bill structure`
+    if (finalFinancials.duplicatesDetected > 0) {
+      overallMessage += `\n\n⚠️ Note: ${finalFinancials.duplicatesDetected} potential duplicate line item(s) detected in bill structure`
       confidence = Math.min(confidence, 85)
     }
     
@@ -1234,13 +1316,13 @@ export async function POST(request: NextRequest) {
       
       // Financial breakdown
       totalCharges: calculatedSubtotal, // This is what we calculated from parsed items
-      statedTotal: financials.balanceDue,
-      billSubtotal: financials.subtotal,
+      statedTotal: finalFinancials.balanceDue,
+      billSubtotal: finalFinancials.subtotal,
       calculatedLineItemsTotal: calculatedSubtotal, // Use our calculation, not AI's
-      discounts: financials.discounts,
-      payments: financials.payments,
-      hmoCoverage: financials.hmoCoverage,
-      philhealthCoverage: financials.philhealthCoverage,
+      discounts: finalFinancials.discounts,
+      payments: finalFinancials.payments,
+      hmoCoverage: finalFinancials.hmoCoverage,
+      philhealthCoverage: finalFinancials.philhealthCoverage,
       
       // Validation results
       chargeStatus: chargeStatus, // CORRECTLY_CHARGED | UNDERCHARGED | OVERCHARGED
@@ -1249,6 +1331,14 @@ export async function POST(request: NextRequest) {
       totalDiscrepancy: totalDiscrepancy,
       affectedParty: affectedParty,
       confidence: confidence,
+      
+      // OCR debugging info (Tesseract disabled - using AI Vision only)
+      ocrInfo: {
+        tesseractConfidence: 0,
+        tesseractGrandTotal: null,
+        aiGrandTotal: aiFinancials.subtotal || null,
+        usedSource: 'ai_vision' as const
+      },
       
       // NEW: Deduction validation results (per improvement guidelines)
       deductionValidation: {
@@ -1279,7 +1369,17 @@ export async function POST(request: NextRequest) {
       couldVerifyMath: couldVerifyMath,
     }
 
-    console.log("[v0] Final response:", response)
+    console.log("[v0] ═══════════════════════════════════════════════════════════════")
+    console.log("[v0] BILLGUARD ANALYSIS COMPLETE")
+    console.log("[v0] ═══════════════════════════════════════════════════════════════")
+    console.log("[v0] Final result:", {
+      chargeStatus,
+      subtotalCheck: subtotalStatus,
+      balanceCheck: balanceStatus,
+      totalDiscrepancy,
+      ocrSource: response.ocrInfo.usedSource
+    })
+    
     return NextResponse.json(response)
   } catch (error) {
     console.error("[v0] Error in analyze-bill route:", error)

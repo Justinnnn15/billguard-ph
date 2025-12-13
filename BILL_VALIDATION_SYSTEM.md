@@ -7,9 +7,82 @@ This system provides **100% accuracy** in determining if a hospital bill is:
 - ⚠️ **UNDERCHARGED** - Hospital loses money (patient pays less than they should)
 - 🚨 **OVERCHARGED** - Patient overpays (patient pays more than they should)
 
+## Version 5.0 - Hierarchical Total Detection
+
+### Key Improvement (December 2024)
+The system now implements **hierarchical total detection** to correctly identify the GRAND TOTAL and avoid using intermediate subtotals like "Hospital Charges" when a full "GRAND TOTAL" (including Professional Fees) exists.
+
+### Problem Solved
+- **Before**: System might read ₱20,044 (Hospital Charges only) instead of ₱25,044 (Hospital Charges + Professional Fees)
+- **After**: System correctly identifies and uses the GRAND TOTAL by:
+  1. Detecting ALL totals with their hierarchy level
+  2. Verifying the grand total equals sum of section totals
+  3. Auto-correcting if an intermediate subtotal was initially extracted
+
+### New Components
+- `lib/bill-extraction.ts` - Hierarchical total extraction logic
+- `lib/bill-extraction-tests.ts` - Comprehensive test suite
+- `api/run-tests` - Endpoint to verify system correctness
+
 ## Core Principle
 
 **"Always validate calculations independently, never assume deductions are legitimate without clear documentation."**
+
+**"ALWAYS use the GRAND TOTAL - the highest-level total that includes ALL charges."**
+
+---
+
+## CRITICAL: Hierarchical Total Detection
+
+### Bill Structure Hierarchy (MUST UNDERSTAND)
+
+Medical bills have a hierarchical structure:
+
+```
+LEVEL 1: LINE ITEMS (individual charges)
+├── Room and Board: ₱8,000
+├── Laboratory: ₱5,044
+├── Pharmacy: ₱7,000
+│
+LEVEL 2: CATEGORY SUBTOTALS (optional)
+├── Medical Supplies Subtotal: ₱X
+│
+LEVEL 3: SECTION TOTALS
+├── Total Hospital Charges: ₱20,044
+├── Total Professional Fees: ₱5,000
+│
+LEVEL 4: GRAND TOTAL ← THIS IS WHAT WE NEED!
+└── GRAND TOTAL: ₱25,044 (= Hospital + Professional)
+```
+
+### Grand Total Keywords (Priority)
+
+Look for these in ORDER OF PRIORITY:
+1. "GRAND TOTAL" (most explicit)
+2. "TOTAL AMOUNT DUE"
+3. "AMOUNT DUE"
+4. "AMOUNT PAYABLE"
+5. "FINAL TOTAL"
+6. "BALANCE DUE" (before deductions)
+7. "DUE FROM PATIENT"
+
+### Section Total Keywords (NEVER use as grand total)
+
+- "Total Hospital Charges" ❌
+- "Hospital Charges Subtotal" ❌
+- "Total Professional Fees" ❌
+- "Ward Charges Total" ❌
+
+### Verification Rule
+
+The extracted GRAND TOTAL should:
+✓ Be the SUM of all section totals
+✓ Be the LAST major total in the document
+✓ Be the LARGEST amount (before deductions)
+
+If these checks fail, the system auto-corrects using section totals.
+
+---
 
 ## Key Improvement Guidelines
 
