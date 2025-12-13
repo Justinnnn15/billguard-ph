@@ -347,8 +347,8 @@ function EmailGenerationModal({
   const calculatedTotal = data.totalCharges
   const statedTotal = data.billSubtotal || data.statedTotal || 0
   const difference = Math.abs(calculatedTotal - statedTotal)
-  const isOvercharge = calculatedTotal < statedTotal
-  const isUndercharge = calculatedTotal > statedTotal
+  const isOvercharge = calculatedTotal < statedTotal // Calculated < Stated = Hospital charged MORE
+  const isUndercharge = calculatedTotal > statedTotal // Calculated > Stated = Hospital charged LESS
 
   const handleGenerateEmail = async (templateType: string) => {
     setSelectedTemplate(templateType)

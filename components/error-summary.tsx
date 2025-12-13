@@ -45,8 +45,8 @@ export function ErrorSummary({ data, onGenerateEmail }: ErrorSummaryProps) {
   const calculatedTotal = data.totalCharges
   const statedTotal = data.billSubtotal || data.statedTotal || 0
   const difference = Math.abs(calculatedTotal - statedTotal)
-  const isOvercharge = calculatedTotal < statedTotal
-  const isUndercharge = calculatedTotal > statedTotal
+  const isOvercharge = calculatedTotal < statedTotal // Calculated < Stated = Hospital charged MORE
+  const isUndercharge = calculatedTotal > statedTotal // Calculated > Stated = Hospital charged LESS
   const percentageDiff = statedTotal > 0 ? (difference / statedTotal) * 100 : 0
   const isCritical = percentageDiff > 20
   const isMinor = difference < 10

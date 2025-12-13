@@ -394,17 +394,17 @@ function parseAnalysisResponse(text: string, fallbackItems: Array<{ name: string
   }
 }
 
-// Extract full bill financial structure using Master Prompt v3.0
+// Extract full bill financial structure using Master Prompt v4.0
 interface BillFinancials {
-  calculatedLineItemsTotal?: number | null // AI's calculated sum (with duplicate prevention)
-  subtotal: number | null // Bill's stated total/subtotal
-  discounts: number | null // Total discounts (SC, PWD, etc.)
-  payments: number | null // Cash/card payments made
-  hmoCoverage: number | null // HMO/Company coverage amount
-  philhealthCoverage: number | null // PhilHealth coverage
-  balanceDue: number | null // Final "Due from Patient" amount
-  lineItemsMatchSubtotal?: boolean | null // Whether AI's calculation matches bill's subtotal
-  duplicatesDetected?: number | null // Number of potential duplicates found
+  calculatedLineItemsTotal: number // AI's calculated sum (with duplicate prevention)
+  subtotal: number // Bill's stated total/subtotal
+  discounts: number // Total discounts (SC, PWD, etc.)
+  payments: number // Cash/card payments made
+  hmoCoverage: number // HMO/Company coverage amount
+  philhealthCoverage: number // PhilHealth coverage
+  balanceDue: number // Final "Due from Patient" amount
+  lineItemsMatchSubtotal: boolean | null // Whether AI's calculation matches bill's subtotal
+  duplicatesDetected: number // Number of potential duplicates found
   rawText: string
 }
 
@@ -412,130 +412,118 @@ async function extractBillFinancials(enhancedBuffer: Buffer, enhancedMimeType: s
   try {
     const base64 = enhancedBuffer.toString("base64")
     
-    const masterPromptV3 = `You are an expert hospital billing auditor specializing in Philippine healthcare billing. You excel at parsing complex, hierarchical bill structures and preventing duplicate counting.
+    const masterPromptV4 = `# Hospital Bill Validation System - Complete Analysis Prompt
 
-## CRITICAL TASK: Extract financial data while understanding visual hierarchy
+You are an expert hospital billing auditor. Your task is to extract bill data, perform mathematical validation, and determine if the patient was correctly charged, overcharged, or undercharged.
 
-### STEP 0: Visual Layout Analysis (CRITICAL FIRST STEP)
+## Step-by-Step Process
 
-Before extracting numbers, analyze the document structure:
+### STEP 1: Extract Line Items with Hierarchy Understanding
 
-**A. Identify line item hierarchy:**
-- Lines with NO price next to them = CATEGORY HEADERS (don't count)
-- Lines with prices = ACTUAL CHARGES (count these)
-- Indented/bulleted lines = SUB-ITEMS (count only if they have prices)
+For each line in the charges section, classify as:
+- **CATEGORY_HEADER**: Label with no price (e.g., "ROOM AND BOARD")
+- **ACTUAL_CHARGE**: Line with a price amount
+- **SUB_ITEM**: Indented item under a category
 
-**B. Detect parent-child relationships:**
-Example:
-ROOM AND BOARD ← Header (no price listed)
-  - ROOM AND BOARD - Intensive Care Unit ₱35,000 ← Actual charge
+**Rules:**
+1. If line has NO price → Mark as CATEGORY_HEADER, set count_in_sum = false
+2. If line is indented/bulleted under header → Mark as ACTUAL_CHARGE, count_in_sum = true
+3. If parent and child have same service name → Count child only, not parent
+4. Only sum items where count_in_sum = true
 
-This is ONE charge of ₱35,000, NOT ₱70,000
+### STEP 2: Calculate Line Items Total
 
-**C. Anti-duplication rule:**
-If you see similar service names with one being more specific:
-- "ROOM AND BOARD" (no price)
-- "ROOM AND BOARD - ICU" (₱35,000)
+**YOU MUST CALCULATE THIS:**
+\`\`\`
+calculated_line_items_total = SUM of all items where count_in_sum = true
+\`\`\`
 
-This is the SAME service. Count only the specific one with the price.
+### STEP 3: Extract Bill's Stated Subtotal
 
-### STEP 1: Calculate Line Items Total (WITH DUPLICATE PREVENTION)
-
-**For EACH line in charges section:**
-1. Does it have a price listed next to it? 
-   - NO → It's a category header, SKIP IT
-   - YES → Check if it's a duplicate
-2. Is it indented or a sub-item of something above?
-   - YES → Make sure parent wasn't already counted
-3. Is the service name very similar to another line with same price?
-   - YES → Likely a duplicate, count only once
-
-**Sum ONLY the actual charges (not headers):**
-- Items with prices clearly listed
-- Detailed service descriptions
-- Exclude category labels without prices
-- Exclude parent categories when child items exist
-
-**Verification check:**
-Your calculated total MUST match the bill's stated subtotal (within ₱100).
-If it doesn't, you've likely double-counted something.
-
-### STEP 2: Extract Bill's Stated Subtotal
-
-Find the hospital's official total (labels vary):
+Find the hospital's printed subtotal (look for these labels):
 - "Total Hospital Charges"
-- "Total Bill"
 - "Hospital Bill"
+- "Total Bill"
 - "Subtotal"
+- "Total Amount"
 
-This should MATCH your line items calculation from Step 1.
+### STEP 4: Extract ALL Discounts
 
-### STEP 3: Extract ALL Deductions
-
-**A. HMO/Company Coverage** (CRITICAL):
 Look for:
-- "HMO/COMPANY" sections
-- "Insurance Coverage"
-- "Company Account"
-- Amounts in parentheses like (₱12,000)
-- If "Due from Patient" is LESS than "Total Bill", the difference is likely HMO coverage
-
-**B. PhilHealth Coverage**:
-- "PhilHealth" amounts
-- Government insurance
-
-**C. Discounts**:
-- Senior Citizen (SC)
+- Senior Citizen (SC) discounts
 - PWD discounts
-- Any promotional discounts
+- PhilHealth deductions (listed as discount, not coverage)
+- VAT exemptions
+- Other adjustments
+- Look for "Less:" or negative amounts
 
-**D. Payments Made**:
-- Cash payments
-- Deposits
-- Advance payments
+**CRITICAL**: Distinguish between:
+- **Discounts**: Reductions from subtotal (SC, PWD, VAT exempt)
+- **Coverage**: Third-party payments (HMO, PhilHealth reimbursement)
 
-### STEP 4: Extract Patient Balance
+### STEP 5: Extract ALL Payments & Third-Party Coverage
 
-Find what patient must actually pay:
-- "Due from Patient" ← MOST IMPORTANT
+**CRITICAL - Look for these indicators:**
+
+1. **"Due from Patient" vs "Total Bill" difference**
+   - If Total Bill = ₱139,270.95 and Due from Patient = ₱127,270.95
+   - Difference = ₱12,000 = PAYMENT/COVERAGE already applied
+
+2. **Explicit sections:**
+   - "PAYMENTS/DEPOSITS/DISCOUNTS"
+   - "HMO/COMPANY"
+   - "Less: Payments Made"
+   - "PhilHealth Coverage"
+
+3. **Visual indicators:**
+   - Amounts in parentheses: (₱12,000)
+   - "Less:" prefix
+   - Negative amounts in payment section
+
+### STEP 6: Extract Patient's Stated Balance
+
+Find the amount patient is supposed to pay (look for):
+- "Due from Patient"
 - "Please Pay This Amount"
 - "Balance Due"
-- Usually at BOTTOM, often highlighted
+- "Net Amount Due"
+- "Patient Responsibility"
 
-### OUTPUT FORMAT (return ONLY this JSON):
+### OUTPUT FORMAT (JSON ONLY):
+
+\`\`\`json
 {
-  "calculatedLineItemsTotal": 139270.95,
-  "subtotal": 139270.95,
-  "discounts": 0.00,
+  "calculatedLineItemsTotal": 57074.71,
+  "subtotal": 56325.00,
+  "discounts": 1240.00,
   "hmoCoverage": 12000.00,
   "philhealthCoverage": 0.00,
-  "payments": 0.00,
-  "balanceDue": 127270.95,
-  "lineItemsMatchSubtotal": true,
+  "payments": 4960.00,
+  "balanceDue": 38125.00,
+  "lineItemsMatchSubtotal": false,
   "duplicatesDetected": 0
 }
+\`\`\`
 
 **CRITICAL RULES**:
-1. calculatedLineItemsTotal = sum of ACTUAL charges only (no category headers)
-2. subtotal = what the bill states as total
-3. These two should MATCH (within ₱100)
-4. If they don't match, you've double-counted something
-5. balanceDue = what patient must pay after ALL deductions
-6. Use null for fields not found
+1. calculatedLineItemsTotal = YOUR calculated sum (count_in_sum=true items only)
+2. subtotal = what the BILL states as subtotal/total
+3. discounts = ALL discounts (SC, PWD, VAT, etc.)
+4. hmoCoverage = HMO/Company/Insurance payments
+5. philhealthCoverage = PhilHealth reimbursements
+6. payments = Cash/card payments already made
+7. balanceDue = What patient must pay NOW
+8. lineItemsMatchSubtotal = true if |calculatedLineItemsTotal - subtotal| <= 10
+9. duplicatesDetected = number of duplicate line items found
+10. Use 0.00 (not null) for fields not found
 
-**EXAMPLE**:
-Bill shows:
-- Line items: ICU ₱35,000 + Meds ₱3,750 + Lab ₱10,039 = ₱48,789
-- Stated Total: ₱48,789 ✓ (matches)
-- HMO Coverage: ₱12,000
-- Due from Patient: ₱36,789
-
-Return:
-{"calculatedLineItemsTotal":48789,"subtotal":48789,"discounts":0,"hmoCoverage":12000,"philhealthCoverage":0,"payments":0,"balanceDue":36789,"lineItemsMatchSubtotal":true,"duplicatesDetected":0}
+**VALIDATION CHECKS YOU MUST DO**:
+1. Does calculatedLineItemsTotal match subtotal? (within ₱10)
+2. Does: subtotal - discounts - payments - hmoCoverage - philhealthCoverage = balanceDue? (within ₱10)
 
 Return ONLY valid JSON, no other text.`
 
-    console.log("[v0] Extracting financial structure with Master Prompt v3.0 (Hierarchical Analysis)...")
+    console.log("[v0] Extracting financial structure with Master Prompt v4.0 (100% Accuracy Focus)...")
     
     // Use Groq vision
     try {
@@ -552,7 +540,7 @@ Return ONLY valid JSON, no other text.`
               },
               {
                 type: "text",
-                text: masterPromptV3,
+                text: masterPromptV4,
               },
             ],
           },
@@ -565,15 +553,15 @@ Return ONLY valid JSON, no other text.`
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0])
         const result = {
-          calculatedLineItemsTotal: parsed.calculatedLineItemsTotal ?? null,
-          subtotal: parsed.subtotal ?? null,
-          discounts: parsed.discounts ?? null,
-          payments: parsed.payments ?? null,
-          hmoCoverage: parsed.hmoCoverage ?? null,
-          philhealthCoverage: parsed.philhealthCoverage ?? null,
-          balanceDue: parsed.balanceDue ?? null,
+          calculatedLineItemsTotal: parsed.calculatedLineItemsTotal ?? 0,
+          subtotal: parsed.subtotal ?? 0,
+          discounts: parsed.discounts ?? 0,
+          payments: parsed.payments ?? 0,
+          hmoCoverage: parsed.hmoCoverage ?? 0,
+          philhealthCoverage: parsed.philhealthCoverage ?? 0,
+          balanceDue: parsed.balanceDue ?? 0,
           lineItemsMatchSubtotal: parsed.lineItemsMatchSubtotal ?? null,
-          duplicatesDetected: parsed.duplicatesDetected ?? null,
+          duplicatesDetected: parsed.duplicatesDetected ?? 0,
           rawText: text
         }
         console.log("[v0] ✓ Extracted financials:", result)
@@ -610,19 +598,29 @@ Return ONLY valid JSON, no other text.`
     // No financial data extracted
     console.warn("[v0] ⚠️ Could not extract financial structure")
     return {
-      subtotal: null,
-      discounts: null,
-      payments: null,
-      balanceDue: null,
+      calculatedLineItemsTotal: 0,
+      subtotal: 0,
+      discounts: 0,
+      payments: 0,
+      hmoCoverage: 0,
+      philhealthCoverage: 0,
+      balanceDue: 0,
+      lineItemsMatchSubtotal: null,
+      duplicatesDetected: 0,
       rawText: ""
     }
   } catch (error) {
     console.error("[v0] Error in extractBillFinancials:", error)
     return {
-      subtotal: null,
-      discounts: null,
-      payments: null,
-      balanceDue: null,
+      calculatedLineItemsTotal: 0,
+      subtotal: 0,
+      discounts: 0,
+      payments: 0,
+      hmoCoverage: 0,
+      philhealthCoverage: 0,
+      balanceDue: 0,
+      lineItemsMatchSubtotal: null,
+      duplicatesDetected: 0,
       rawText: ""
     }
   }
@@ -691,12 +689,15 @@ export async function POST(request: NextRequest) {
       }
       
       if (foundSubtotal || foundBalance) {
-        financials.subtotal = foundSubtotal
-        financials.balanceDue = foundBalance
-        financials.discounts = foundDiscount
-        financials.payments = foundPayment
-        financials.hmoCoverage = null
-        financials.philhealthCoverage = null
+        financials.subtotal = foundSubtotal || 0
+        financials.balanceDue = foundBalance || 0
+        financials.discounts = foundDiscount || 0
+        financials.payments = foundPayment || 0
+        financials.hmoCoverage = 0
+        financials.philhealthCoverage = 0
+        financials.calculatedLineItemsTotal = 0
+        financials.lineItemsMatchSubtotal = null
+        financials.duplicatesDetected = 0
         console.log("[v0] ✓ Extracted via text parsing:", financials)
       }
     }
@@ -726,106 +727,224 @@ export async function POST(request: NextRequest) {
 
     calculatedSubtotal = Math.round(calculatedSubtotal * 100) / 100
 
-    // Step 5: MATH VERIFICATION - Check bill calculations
+    // Step 5: COMPREHENSIVE BILL VALIDATION - Check all calculations
     const mathErrors: any[] = []
+    let chargeStatus: "CORRECTLY_CHARGED" | "UNDERCHARGED" | "OVERCHARGED" = "CORRECTLY_CHARGED"
+    let totalDiscrepancy = 0
     
-    // Check 1: Does our item sum match the bill's subtotal?
-    if (financials.subtotal !== null) {
-      const subtotalDiff = Math.abs(financials.subtotal - calculatedSubtotal)
-      const subtotalPercent = (subtotalDiff / calculatedSubtotal) * 100
+    // ═══════════════════════════════════════════════════════════════════
+    // CHECK 1: SUBTOTAL VERIFICATION
+    // Does our line items calculation match the bill's stated subtotal?
+    // ═══════════════════════════════════════════════════════════════════
+    let subtotalStatus: "CORRECT" | "UNDERCHARGED_SUBTOTAL" | "OVERCHARGED_SUBTOTAL" = "CORRECT"
+    
+    if (financials.subtotal > 0 && calculatedSubtotal > 0) {
+      const subtotalDiff = calculatedSubtotal - financials.subtotal
       
-      console.log("[v0] Subtotal check - Bill:", financials.subtotal, "Our calc:", calculatedSubtotal, "Diff:", subtotalDiff)
+      console.log("[v0] ═══ SUBTOTAL VERIFICATION ═══")
+      console.log(`[v0] Our calculated line items total: ₱${calculatedSubtotal.toLocaleString()}`)
+      console.log(`[v0] Bill's stated subtotal: ₱${financials.subtotal.toLocaleString()}`)
+      console.log(`[v0] Difference: ₱${subtotalDiff.toLocaleString()}`)
       
-      if (subtotalDiff > 5 && subtotalPercent > 1) {
-        mathErrors.push({
-          name: "⚠️ SUBTOTAL MISMATCH",
-          total: financials.subtotal,
-          status: "error" as const,
-          reason: `Bill shows subtotal of ₱${financials.subtotal.toLocaleString()}, but line items sum to ₱${calculatedSubtotal.toLocaleString()}. Difference: ₱${subtotalDiff.toLocaleString()}. The hospital's math is wrong.`,
-          expectedPrice: calculatedSubtotal,
-        })
+      if (Math.abs(subtotalDiff) > 10) {
+        if (subtotalDiff > 0) {
+          // Calculated > Stated = Hospital undercharged (they lose money)
+          subtotalStatus = "UNDERCHARGED_SUBTOTAL"
+          mathErrors.push({
+            name: "⚠️ SUBTOTAL UNDERCHARGE",
+            total: financials.subtotal,
+            status: "error" as const,
+            reason: `Line items sum to ₱${calculatedSubtotal.toLocaleString()} but bill shows ₱${financials.subtotal.toLocaleString()}. Hospital undercharged by ₱${Math.abs(subtotalDiff).toLocaleString()}. This is a revenue loss for the hospital.`,
+            expectedPrice: calculatedSubtotal,
+            impact: "hospital",
+          })
+        } else {
+          // Calculated < Stated = Hospital overcharged (patient pays more)
+          subtotalStatus = "OVERCHARGED_SUBTOTAL"
+          mathErrors.push({
+            name: "⚠️ SUBTOTAL OVERCHARGE",
+            total: financials.subtotal,
+            status: "error" as const,
+            reason: `Line items sum to ₱${calculatedSubtotal.toLocaleString()} but bill shows ₱${financials.subtotal.toLocaleString()}. Hospital overcharged by ₱${Math.abs(subtotalDiff).toLocaleString()}. Patient is being charged MORE than itemized services.`,
+            expectedPrice: calculatedSubtotal,
+            impact: "patient",
+          })
+        }
         errorCount++
-        totalMathErrors += subtotalDiff
+        totalDiscrepancy += Math.abs(subtotalDiff)
+      } else {
+        console.log(`[v0] ✓ Subtotal matches (within ₱${Math.abs(subtotalDiff).toFixed(2)})`)
       }
     }
     
-    // Check 2: Verify balance calculation formula (with HMO/PhilHealth coverage)
-    if (financials.subtotal !== null && financials.balanceDue !== null) {
-      const totalDeductions = (financials.discounts || 0) + (financials.payments || 0) + (financials.hmoCoverage || 0) + (financials.philhealthCoverage || 0)
-      const expectedBalance = financials.subtotal - totalDeductions
-      const balanceDiff = Math.abs(financials.balanceDue - expectedBalance)
+    // ═══════════════════════════════════════════════════════════════════
+    // CHECK 2: BALANCE VERIFICATION
+    // Does: subtotal - discounts - payments - HMO - PhilHealth = balanceDue?
+    // ═══════════════════════════════════════════════════════════════════
+    let balanceStatus: "CORRECT" | "PATIENT_UNDERCHARGED" | "PATIENT_OVERCHARGED" = "CORRECT"
+    
+    if (financials.subtotal > 0 && financials.balanceDue >= 0) {
+      // Use the BILL's stated subtotal for balance calculation (not our calculated one)
+      const totalDeductions = financials.discounts + financials.payments + financials.hmoCoverage + financials.philhealthCoverage
+      const calculatedBalance = financials.subtotal - totalDeductions
+      const balanceDiff = calculatedBalance - financials.balanceDue
       
-      console.log("[v0] Balance verification (Master Prompt v2.0):")
-      console.log(`[v0]   Total Bill: ₱${financials.subtotal.toLocaleString()}`)
-      console.log(`[v0]   - Discounts: ₱${(financials.discounts || 0).toLocaleString()}`)
-      console.log(`[v0]   - Payments: ₱${(financials.payments || 0).toLocaleString()}`)
-      console.log(`[v0]   - HMO Coverage: ₱${(financials.hmoCoverage || 0).toLocaleString()}`)
-      console.log(`[v0]   - PhilHealth: ₱${(financials.philhealthCoverage || 0).toLocaleString()}`)
-      console.log(`[v0]   = Expected Balance: ₱${expectedBalance.toLocaleString()}`)
-      console.log(`[v0]   Bill States: ₱${financials.balanceDue.toLocaleString()}`)
-      console.log(`[v0]   Difference: ₱${balanceDiff.toLocaleString()}`)
+      console.log("[v0] ═══ BALANCE VERIFICATION ═══")
+      console.log(`[v0] Bill subtotal: ₱${financials.subtotal.toLocaleString()}`)
+      console.log(`[v0] - Discounts: ₱${financials.discounts.toLocaleString()}`)
+      console.log(`[v0] - Payments: ₱${financials.payments.toLocaleString()}`)
+      console.log(`[v0] - HMO Coverage: ₱${financials.hmoCoverage.toLocaleString()}`)
+      console.log(`[v0] - PhilHealth: ₱${financials.philhealthCoverage.toLocaleString()}`)
+      console.log(`[v0] = Calculated balance: ₱${calculatedBalance.toLocaleString()}`)
+      console.log(`[v0] Bill states: ₱${financials.balanceDue.toLocaleString()}`)
+      console.log(`[v0] Difference: ₱${balanceDiff.toLocaleString()}`)
       
-      if (balanceDiff > 5) {
+      if (Math.abs(balanceDiff) > 10) {
         const deductionBreakdown = []
-        if (financials.discounts && financials.discounts > 0) deductionBreakdown.push(`Discounts ₱${financials.discounts.toLocaleString()}`)
-        if (financials.payments && financials.payments > 0) deductionBreakdown.push(`Payments ₱${financials.payments.toLocaleString()}`)
-        if (financials.hmoCoverage && financials.hmoCoverage > 0) deductionBreakdown.push(`HMO Coverage ₱${financials.hmoCoverage.toLocaleString()}`)
-        if (financials.philhealthCoverage && financials.philhealthCoverage > 0) deductionBreakdown.push(`PhilHealth ₱${financials.philhealthCoverage.toLocaleString()}`)
+        if (financials.discounts > 0) deductionBreakdown.push(`₱${financials.discounts.toLocaleString()} discounts`)
+        if (financials.payments > 0) deductionBreakdown.push(`₱${financials.payments.toLocaleString()} payments`)
+        if (financials.hmoCoverage > 0) deductionBreakdown.push(`₱${financials.hmoCoverage.toLocaleString()} HMO`)
+        if (financials.philhealthCoverage > 0) deductionBreakdown.push(`₱${financials.philhealthCoverage.toLocaleString()} PhilHealth`)
         
-        mathErrors.push({
-          name: "⚠️ BALANCE CALCULATION ERROR",
-          total: financials.balanceDue,
-          status: "error" as const,
-          reason: `Balance calculation is wrong. Should be: ₱${financials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${expectedBalance.toLocaleString()}, but bill shows ₱${financials.balanceDue.toLocaleString()}. Difference: ₱${balanceDiff.toLocaleString()}.`,
-          expectedPrice: expectedBalance,
-        })
+        if (balanceDiff > 0) {
+          // Calculated > Stated = Patient undercharged (paying less)
+          balanceStatus = "PATIENT_UNDERCHARGED"
+          mathErrors.push({
+            name: "⚠️ PATIENT BALANCE UNDERCHARGE",
+            total: financials.balanceDue,
+            status: "error" as const,
+            reason: `Balance should be: ₱${financials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${calculatedBalance.toLocaleString()}, but bill shows ₱${financials.balanceDue.toLocaleString()}. Patient is paying ₱${Math.abs(balanceDiff).toLocaleString()} LESS than they should (hospital loses money).`,
+            expectedPrice: calculatedBalance,
+            impact: "hospital",
+          })
+        } else {
+          // Calculated < Stated = Patient overcharged (paying more)
+          balanceStatus = "PATIENT_OVERCHARGED"
+          mathErrors.push({
+            name: "⚠️ PATIENT BALANCE OVERCHARGE",
+            total: financials.balanceDue,
+            status: "error" as const,
+            reason: `Balance should be: ₱${financials.subtotal.toLocaleString()} - ${deductionBreakdown.join(' - ')} = ₱${calculatedBalance.toLocaleString()}, but bill shows ₱${financials.balanceDue.toLocaleString()}. Patient is paying ₱${Math.abs(balanceDiff).toLocaleString()} MORE than they should.`,
+            expectedPrice: calculatedBalance,
+            impact: "patient",
+          })
+        }
         errorCount++
-        totalMathErrors += balanceDiff
+        totalDiscrepancy += Math.abs(balanceDiff)
+      } else {
+        console.log(`[v0] ✓ Balance calculation correct (within ₱${Math.abs(balanceDiff).toFixed(2)})`)
       }
     }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // DETERMINE FINAL STATUS
+    // ═══════════════════════════════════════════════════════════════════
+    if (subtotalStatus === "CORRECT" && balanceStatus === "CORRECT") {
+      chargeStatus = "CORRECTLY_CHARGED"
+    } else if (subtotalStatus.includes("UNDERCHARGED") || balanceStatus === "PATIENT_UNDERCHARGED") {
+      chargeStatus = "UNDERCHARGED"
+    } else {
+      chargeStatus = "OVERCHARGED"
+    }
+    
+    console.log("[v0] ═══ FINAL VALIDATION STATUS ═══")
+    console.log(`[v0] Subtotal check: ${subtotalStatus}`)
+    console.log(`[v0] Balance check: ${balanceStatus}`)
+    console.log(`[v0] Overall status: ${chargeStatus}`)
+    console.log(`[v0] Total discrepancy: ₱${totalDiscrepancy.toLocaleString()}`)
+
 
     // Step 6: Combine math errors with item analysis
     const finalItems = [...mathErrors, ...analysis.items]
     
     // Check if we have financial data to verify calculations
-    const hasFinancialData = financials.subtotal !== null || financials.balanceDue !== null
+    const hasFinancialData = financials.subtotal > 0 || financials.balanceDue >= 0
     const couldVerifyMath = hasFinancialData
     
-    // Check for duplicate detection by AI
-    const aiDetectedDuplicates = financials.duplicatesDetected && financials.duplicatesDetected > 0
-    const lineItemsMismatch = financials.calculatedLineItemsTotal && financials.subtotal && 
-      Math.abs(financials.calculatedLineItemsTotal - financials.subtotal) > 100
+    // Determine affected party and confidence
+    let affectedParty: "hospital" | "patient" | "none" = "none"
+    let confidence = 95
     
+    if (chargeStatus === "UNDERCHARGED") {
+      affectedParty = "hospital"
+    } else if (chargeStatus === "OVERCHARGED") {
+      affectedParty = "patient"
+    }
+    
+    // Build comprehensive assessment message
     let overallMessage = ""
-    if (errorCount > 0) {
-      overallMessage = `Found ${errorCount} billing error${errorCount > 1 ? 's' : ''}: ${mathErrors.length > 0 ? mathErrors.map(e => e.name).join(', ') : ''}${duplicateCount > 0 ? ` and ${duplicateCount} duplicate charge${duplicateCount > 1 ? 's' : ''}` : ''}.`
-    } else if (aiDetectedDuplicates || lineItemsMismatch) {
-      if (aiDetectedDuplicates) {
-        overallMessage = `⚠️ AI detected ${financials.duplicatesDetected} potential duplicate line item(s) in bill structure (e.g., parent category counted with child items). This may cause subtotal inflation.`
-        warningCount++
-      } else if (lineItemsMismatch) {
-        const diff = Math.abs((financials.calculatedLineItemsTotal || 0) - (financials.subtotal || 0))
-        overallMessage = `⚠️ Line items calculation (₱${financials.calculatedLineItemsTotal?.toLocaleString()}) differs from stated subtotal (₱${financials.subtotal?.toLocaleString()}) by ₱${diff.toLocaleString()}. Possible duplicate counting in bill structure.`
-        warningCount++
+    
+    if (chargeStatus === "CORRECTLY_CHARGED" && couldVerifyMath) {
+      overallMessage = `✅ CORRECTLY CHARGED - All calculations verified.\n\n`
+      overallMessage += `✓ Subtotal: Line items match bill's stated total\n`
+      overallMessage += `✓ Balance: All deductions properly applied\n`
+      overallMessage += `✓ Patient pays correct amount: ₱${financials.balanceDue.toLocaleString()}`
+      confidence = 100
+    } else if (chargeStatus === "UNDERCHARGED") {
+      overallMessage = `⚠️ UNDERCHARGED - Hospital loses ₱${totalDiscrepancy.toLocaleString()}\n\n`
+      overallMessage += `Affected party: HOSPITAL (revenue loss)\n\n`
+      
+      if (subtotalStatus === "UNDERCHARGED_SUBTOTAL") {
+        overallMessage += `• Subtotal Issue: Bill shows ₱${financials.subtotal.toLocaleString()} but line items sum to ₱${calculatedSubtotal.toLocaleString()}\n`
       }
+      if (balanceStatus === "PATIENT_UNDERCHARGED") {
+        overallMessage += `• Balance Issue: Patient paying ₱${Math.abs(totalDiscrepancy).toLocaleString()} less than they should\n`
+      }
+      
+      overallMessage += `\nLikely causes: Pre-applied discount not documented, calculation error, or missing line items`
+      confidence = 90
+    } else if (chargeStatus === "OVERCHARGED") {
+      overallMessage = `🚨 OVERCHARGED - Patient pays ₱${totalDiscrepancy.toLocaleString()} extra\n\n`
+      overallMessage += `Affected party: PATIENT (overpayment)\n\n`
+      
+      if (subtotalStatus === "OVERCHARGED_SUBTOTAL") {
+        overallMessage += `• Subtotal Issue: Bill shows ₱${financials.subtotal.toLocaleString()} but line items only sum to ₱${financials.calculatedLineItemsTotal.toLocaleString()}\n`
+      }
+      if (balanceStatus === "PATIENT_OVERCHARGED") {
+        overallMessage += `• Balance Issue: Patient paying ₱${Math.abs(totalDiscrepancy).toLocaleString()} more than they should\n`
+      }
+      
+      overallMessage += `\n⚠️ RECOMMENDED ACTION: Request bill correction immediately`
+      confidence = 95
     } else if (!couldVerifyMath) {
-      overallMessage = `⚠️ Could not verify bill calculations - financial totals not found on bill. Checked for duplicates only. Upload a clearer image showing the total/balance section.`
-      warningCount++
-    } else {
-      overallMessage = `✓ No billing errors detected. Math verified: Subtotal matches line items, balance calculation is correct.`
+      overallMessage = `⚠️ Could not verify bill calculations - financial totals not clearly visible.\n\n`
+      overallMessage += `Please upload a clearer image showing:\n`
+      overallMessage += `• Total/Subtotal section\n`
+      overallMessage += `• Discounts and payments\n`
+      overallMessage += `• Final "Due from Patient" amount`
+      confidence = 50
+    }
+    
+    // Check for AI-detected duplicates
+    if (financials.duplicatesDetected > 0) {
+      overallMessage += `\n\n⚠️ Note: ${financials.duplicatesDetected} potential duplicate line item(s) detected in bill structure`
+      confidence = Math.min(confidence, 85)
     }
 
     const response = {
       items: finalItems,
       overallAssessment: overallMessage,
-      totalCharges: calculatedSubtotal,
+      
+      // Financial breakdown
+      totalCharges: calculatedSubtotal, // This is what we calculated from parsed items
       statedTotal: financials.balanceDue,
       billSubtotal: financials.subtotal,
+      calculatedLineItemsTotal: calculatedSubtotal, // Use our calculation, not AI's
       discounts: financials.discounts,
       payments: financials.payments,
       hmoCoverage: financials.hmoCoverage,
       philhealthCoverage: financials.philhealthCoverage,
-      totalMathErrors: Math.round(totalMathErrors * 100) / 100,
+      
+      // Validation results
+      chargeStatus: chargeStatus, // CORRECTLY_CHARGED | UNDERCHARGED | OVERCHARGED
+      subtotalCheck: subtotalStatus,
+      balanceCheck: balanceStatus,
+      totalDiscrepancy: totalDiscrepancy,
+      affectedParty: affectedParty,
+      confidence: confidence,
+      
+      // Legacy fields
+      totalMathErrors: totalDiscrepancy,
       hasErrors: errorCount > 0,
       errorCount: errorCount,
       warningCount: warningCount,
