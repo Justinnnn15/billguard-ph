@@ -82,12 +82,12 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-secondary via-background to-accent/5 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-background to-purple-50 dark:from-slate-900 dark:via-background dark:to-blue-950 flex items-center justify-center p-4">
       <div className="max-w-2xl w-full">
         {/* Header */}
-        <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-primary/10 mb-4">
-            <svg className="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="text-center mb-12 animate-fade-in">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 shadow-lg shadow-blue-500/50 mb-6 transform hover:scale-110 transition-transform">
+            <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -96,24 +96,27 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
               />
             </svg>
           </div>
-          <h1 className="text-4xl font-bold text-foreground mb-3">BillGuard</h1>
-          <p className="text-xl text-muted-foreground">Upload your hospital bill to get started</p>
+          <h1 className="text-5xl font-black text-foreground mb-4 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">BillGuard</h1>
+          <p className="text-xl text-muted-foreground font-medium">Verify your hospital bills with AI-powered analysis</p>
         </div>
 
         {/* File Preview Section */}
         {selectedFile ? (
-          <Card className="p-6 mb-8 border-2 border-primary/30">
+          <Card className="p-8 mb-8 border-2 border-primary/30 shadow-xl animate-scale-in bg-gradient-to-br from-white to-blue-50 dark:from-slate-800 dark:to-slate-900">
             <div className="flex flex-col items-center">
               {/* Preview */}
-              <div className="mb-4 relative">
+              <div className="mb-6 relative">
                 {filePreview ? (
-                  <img 
-                    src={filePreview} 
-                    alt="Bill preview" 
-                    className="max-h-64 max-w-full rounded-lg object-contain border border-border"
-                  />
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-gradient-to-r from-blue-500 to-purple-600 rounded-lg blur opacity-25 group-hover:opacity-40 transition"></div>
+                    <img 
+                      src={filePreview} 
+                      alt="Bill preview" 
+                      className="relative max-h-72 max-w-full rounded-lg object-contain border-2 border-border shadow-lg"
+                    />
+                  </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center p-8 bg-secondary/50 rounded-lg">
+                  <div className="flex flex-col items-center justify-center p-10 bg-gradient-to-br from-secondary/50 to-secondary/30 rounded-xl">
                     {getFileIcon()}
                   </div>
                 )}
@@ -128,10 +131,10 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
               </div>
 
               {/* Action Buttons */}
-              <div className="flex gap-3 w-full max-w-sm">
+              <div className="flex gap-4 w-full max-w-sm">
                 <Button 
                   variant="outline" 
-                  className="flex-1"
+                  className="flex-1 border-2 hover:bg-red-50 hover:border-red-300 hover:text-red-600 dark:hover:bg-red-950 transition-all"
                   onClick={handleRemoveFile}
                 >
                   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -140,7 +143,7 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
                   Remove
                 </Button>
                 <Button 
-                  className="flex-1 bg-primary hover:bg-primary/90"
+                  className="flex-1 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-lg shadow-blue-500/50 hover:shadow-xl transition-all transform hover:scale-105"
                   onClick={handleStartScanning}
                 >
                   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -153,14 +156,14 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
           </Card>
         ) : (
           /* Upload Buttons */
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
             <Card
-              className="p-8 border-2 border-dashed hover:border-primary/50 transition-colors cursor-pointer group"
+              className="p-10 border-2 border-dashed border-blue-200 dark:border-blue-800 hover:border-blue-500 dark:hover:border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/30 transition-all cursor-pointer group transform hover:scale-105 hover:shadow-xl animate-fade-in"
               onClick={handleUploadClick}
             >
               <div className="text-center">
-                <div className="inline-flex items-center justify-center w-12 h-12 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors mb-4">
-                  <svg className="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-xl bg-gradient-to-br from-blue-100 to-blue-200 dark:from-blue-900 dark:to-blue-800 group-hover:from-blue-500 group-hover:to-purple-600 transition-all mb-4 shadow-lg">
+                  <svg className="w-8 h-8 text-blue-600 dark:text-blue-300 group-hover:text-white transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
@@ -169,18 +172,18 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
                     />
                   </svg>
                 </div>
-                <h3 className="font-semibold text-foreground mb-1">Upload Bill</h3>
+                <h3 className="font-bold text-foreground mb-2 text-lg">Upload Bill</h3>
                 <p className="text-sm text-muted-foreground">Any image or PDF file</p>
               </div>
             </Card>
 
             <Card
-              className="p-8 border-2 border-dashed hover:border-primary/50 transition-colors cursor-pointer group"
+              className="p-10 border-2 border-dashed border-purple-200 dark:border-purple-800 hover:border-purple-500 dark:hover:border-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/30 transition-all cursor-pointer group transform hover:scale-105 hover:shadow-xl animate-fade-in animation-delay-100"
               onClick={handleUploadClick}
             >
               <div className="text-center">
-                <div className="inline-flex items-center justify-center w-12 h-12 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors mb-4">
-                  <svg className="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-xl bg-gradient-to-br from-purple-100 to-purple-200 dark:from-purple-900 dark:to-purple-800 group-hover:from-purple-500 group-hover:to-pink-600 transition-all mb-4 shadow-lg">
+                  <svg className="w-8 h-8 text-purple-600 dark:text-purple-300 group-hover:text-white transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
@@ -195,7 +198,7 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
                     />
                   </svg>
                 </div>
-                <h3 className="font-semibold text-foreground mb-1">Take Picture</h3>
+                <h3 className="font-bold text-foreground mb-2 text-lg">Take Picture</h3>
                 <p className="text-sm text-muted-foreground">Capture bill image</p>
               </div>
             </Card>
@@ -212,22 +215,24 @@ export function Dashboard({ onFileSelected }: DashboardProps) {
         />
 
         {/* Info Section */}
-        <Card className="p-6 bg-secondary/50 border-primary/20 mb-4">
+        <Card className="p-6 bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-950/30 dark:to-purple-950/30 border-blue-200 dark:border-blue-800 mb-4 shadow-md">
           <div className="flex gap-4">
             <div className="flex-shrink-0">
-              <svg className="w-5 h-5 text-primary mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-                <path
-                  fillRule="evenodd"
-                  d="M18 5v8a2 2 0 01-2 2h-5l-5 4v-4H4a2 2 0 01-2-2V5a2 2 0 012-2h12a2 2 0 012 2zm-11-1a1 1 0 11-2 0 1 1 0 012 0z"
-                  clipRule="evenodd"
-                />
-              </svg>
+              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                  <path
+                    fillRule="evenodd"
+                    d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </div>
             </div>
             <div>
-              <h4 className="font-semibold text-foreground mb-1">How it works</h4>
-              <p className="text-sm text-muted-foreground">
+              <h4 className="font-bold text-foreground mb-2">How it works</h4>
+              <p className="text-sm text-muted-foreground leading-relaxed">
                 BillGuard uses advanced AI to scan your hospital bill, extract charges, and identify potential
-                overcharges compared to Philippine hospital standards.
+                discrepancies compared to Philippine hospital standards.
               </p>
             </div>
           </div>

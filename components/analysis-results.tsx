@@ -107,36 +107,38 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50/30 via-background to-purple-50/30 dark:from-slate-950 dark:via-background dark:to-blue-950/30">
       {/* Header */}
-      <div className="bg-white dark:bg-card border-b border-border sticky top-0 z-10">
+      <div className="bg-white/80 dark:bg-card/80 backdrop-blur-sm border-b border-border sticky top-0 z-10 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
               onClick={onBackToDashboard}
-              className="inline-flex items-center justify-center w-10 h-10 rounded-lg hover:bg-muted transition-colors"
+              className="inline-flex items-center justify-center w-10 h-10 rounded-lg hover:bg-gradient-to-r hover:from-blue-500 hover:to-purple-600 hover:text-white transition-all transform hover:scale-110"
               aria-label="Back to dashboard"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
             </button>
-            <h1 className="text-2xl font-bold text-foreground">Analysis Results</h1>
+            <h1 className="text-2xl font-black text-foreground">Analysis Results</h1>
           </div>
         </div>
       </div>
 
       {/* Overall Status Banner */}
       {data.hasErrors ? (
-        <div className="bg-red-50 dark:bg-red-950 border-b border-red-200 dark:border-red-800">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-            <div className="flex items-center gap-3">
-              <span className="text-2xl">⚠</span>
+        <div className="bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-950/50 dark:to-orange-950/50 border-b border-red-200 dark:border-red-800 shadow-sm">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5">
+            <div className="flex items-center gap-4">
+              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center shadow-lg">
+                <span className="text-2xl text-white">⚠</span>
+              </div>
               <div>
-                <p className="font-semibold text-red-900 dark:text-red-200">
+                <p className="font-bold text-red-900 dark:text-red-200 text-lg">
                   {data.errorCount} billing error{data.errorCount > 1 ? "s" : ""} detected
                 </p>
-                <p className="text-sm text-red-700 dark:text-red-300">
+                <p className="text-sm text-red-700 dark:text-red-300 font-medium">
                   {data.duplicateCount ? `${data.duplicateCount} duplicate${data.duplicateCount > 1 ? 's' : ''} • ` : ''}Math errors: ₱{data.totalMathErrors.toLocaleString()}
                 </p>
               </div>
@@ -160,12 +162,14 @@ export function AnalysisResults({ data, billImage, onBackToDashboard }: Analysis
           </div>
         </div>
       ) : (
-        <div className="bg-green-50 dark:bg-green-950 border-b border-green-200 dark:border-green-800">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-            <div className="flex items-center gap-3">
-              <span className="text-2xl">✓</span>
+        <div className="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-950/50 dark:to-emerald-950/50 border-b border-green-200 dark:border-green-800 shadow-sm">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5">
+            <div className="flex items-center gap-4">
+              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-gradient-to-br from-green-500 to-emerald-500 flex items-center justify-center shadow-lg">
+                <span className="text-2xl text-white">✓</span>
+              </div>
               <div>
-                <p className="font-semibold text-green-900 dark:text-green-200">
+                <p className="font-bold text-green-900 dark:text-green-200 text-lg">
                   Math verified - No errors detected!
                 </p>
               </div>
